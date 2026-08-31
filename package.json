@@ -1,0 +1,26 @@
+{
+  "name": "glass-box",
+  "version": "0.1.0",
+  "description": "可观测、可插拔的迷你 coding agent（玻璃盒）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.ts",
+    "chat": "node src/chat.ts",
+    "web": "node src/web.ts",
+    "demo": "node src/index.ts \"echo Glass-Box 引擎跑通了\"",
+    "tui": "node src/tui.ts",
+    "test": "node --test test/*.test.ts",
+    "eval": "node src/eval/run.ts",
+    "eval:kb": "node src/eval/retrieval.ts",
+    "kb:distill": "node src/kbDistill.ts",
+    "kb:ctx": "node src/kbContext.ts",
+    "kb:wiki": "node src/kbWiki.ts",
+    "kb:audit": "node src/kbAudit.ts",
+    "typecheck": "tsc --noEmit",
+    "replay": "node src/replay.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

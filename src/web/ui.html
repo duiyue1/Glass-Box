@@ -1,0 +1,3204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Glass-Box</title>
+<style>
+  :root{
+    /* 简约黑白：底色一律白 / 近白，层次靠 1px 细线和少量灰阶拉开，不用彩色。
+       语义色（通过 / 待复核 / 没通过）保留但压到很低的饱和度——
+       这些点是承载信息的（红点=溯源校验没过），全灰会把信息抹掉。 */
+    --bg:#ffffff; --bg-soft:#fafafa; --panel:#ffffff; --line:#ebebeb;
+    --line-strong:#d0d0d0;
+    --text:#111111; --muted:#5c5c5c; --dim:#9a9a9a;
+    /* 强调色就是黑：选中态用黑底白字或浅灰底黑字，不引入蓝 */
+    --accent:#111111; --accent-soft:#f2f2f2;
+    --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; font-family:var(--sans); color:var(--text); background:var(--bg);
+    display:flex; flex-direction:column; overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ── header ── */
+  header{
+    display:flex; align-items:center; gap:12px;
+    padding:12px 22px; border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.85); backdrop-filter:blur(8px);
+  }
+  .logo{font-weight:600; letter-spacing:.2px; font-size:15px}
+  .logo span{color:var(--dim); font-weight:400}
+  .nav{display:flex; gap:4px; margin-left:14px}
+  .nav button{
+    font-family:var(--sans); font-size:12.5px; padding:5px 12px; border-radius:8px; cursor:pointer;
+    border:1px solid transparent; background:transparent; color:var(--muted); transition:all .15s;
+  }
+  .nav button:hover{color:var(--text); background:var(--bg-soft)}
+  .nav button.on{background:var(--accent-soft); color:var(--text); font-weight:500}
+  .dot{width:7px;height:7px;border-radius:50%;background:#c9c9c9;transition:background .3s}
+  .dot.live{background:var(--ok)}
+  .dot.busy{background:var(--warn); animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+  header .right{margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--dim)}
+
+  /* ── layout ── */
+  /* #chat 自带 display:flex，会盖掉 hidden 属性自带的 display:none —— 结果切到别的页时
+     对话区还占着第 1 列，把 #sess 挤进右边 392px 的窄列里（看起来就像"没有变化"）。
+     所以这里强制一条：带 hidden 的元素一律不显示。 */
+  [hidden]{display:none !important}
+  main{flex:1; display:grid; grid-template-columns:minmax(0,1fr) 392px; min-height:0}
+  #chat{overflow-y:auto; padding:26px 28px 8px; display:flex; flex-direction:column; gap:14px}
+  aside{
+    border-left:1px solid var(--line); background:var(--bg-soft);
+    overflow-y:auto; padding:18px 16px 28px; display:flex; flex-direction:column; gap:12px;
+  }
+
+  /* ── chat ── */
+  .msg{max-width:min(720px,92%); animation:rise .22s ease both}
+  @keyframes rise{from{opacity:0;transform:translateY(4px)}}
+  .msg.user{align-self:flex-end}
+  .msg.user .body{
+    background:var(--bg-soft); border:1px solid var(--line); border-radius:12px 12px 4px 12px;
+    padding:10px 14px; font-size:14.5px; line-height:1.65;
+  }
+  .msg.ai .body{font-size:14.5px; line-height:1.75; white-space:pre-wrap; word-break:break-word}
+  .msg .who{
+    font-family:var(--mono); font-size:10.5px; letter-spacing:.8px; text-transform:uppercase;
+    color:var(--dim); margin-bottom:6px;
+  }
+  .msg.user .who{text-align:right}
+  .caret{display:inline-block;width:7px;height:15px;background:var(--text);vertical-align:-2px;
+    margin-left:2px; animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  .trace{
+    align-self:flex-start; max-width:min(720px,92%);
+    font-family:var(--mono); font-size:11.5px; color:var(--dim);
+    border-left:2px solid var(--line); padding:2px 0 2px 10px;
+    display:flex; gap:8px; align-items:baseline;
+  }
+  .trace b{color:var(--muted); font-weight:500}
+  .trace.ok b{color:var(--ok)} .trace.bad b{color:var(--bad)} .trace.warn b{color:var(--warn)}
+
+  /* ── panel ── */
+  aside .sec{border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:#fff}
+  .sec > h3{
+    margin:0 0 10px; font-family:var(--mono); font-size:10.5px; font-weight:500;
+    letter-spacing:1.2px; text-transform:uppercase; color:var(--dim);
+  }
+  .chips{display:flex; flex-wrap:wrap; gap:6px}
+  .chip{
+    font-family:var(--mono); font-size:11px; padding:3px 8px; border-radius:6px;
+    border:1px solid var(--line); color:var(--muted); background:#fff; transition:all .15s;
+  }
+  .chip.on{border-color:var(--text); color:var(--text); background:var(--accent-soft)}
+
+  .bar{height:5px; border-radius:3px; background:#efefef; overflow:hidden; margin:8px 0 6px}
+  .bar > i{display:block; height:100%; width:0; background:#2b2b2b; transition:width .35s ease}
+  .bar.over > i{background:var(--warn)}
+  .meta{font-family:var(--mono); font-size:11px; color:var(--muted)}
+
+  ul.list{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px}
+  ul.list li{font-family:var(--mono); font-size:11.5px; color:var(--muted); line-height:1.5;
+    word-break:break-all}
+  li .sub{display:block; color:var(--dim); margin-top:2px}
+  .mark{display:inline-block; width:12px; color:var(--dim)}
+  .mark.ok{color:var(--ok)} .mark.bad{color:var(--bad)} .mark.on{color:var(--accent)}
+  .empty{font-family:var(--mono); font-size:11.5px; color:var(--dim)}
+
+  ul.act li{display:flex; gap:6px; align-items:baseline; word-break:break-all}
+  ul.act .k{color:var(--muted); flex:none}
+  ul.act .k.created{color:var(--ok)} ul.act .k.edited{color:var(--text)}
+  ul.act .k.ran{color:var(--warn)} ul.act .k.bad{color:var(--bad)}
+  ul.act .d{color:var(--muted); flex:1}
+  ul.act .n{font-size:11px; flex:none} ul.act .n .p{color:var(--ok)} ul.act .n .m{color:var(--bad)}
+
+  #log{max-height:190px; overflow-y:auto; display:flex; flex-direction:column; gap:4px}
+  /* flex 子项默认 flex-shrink:1，超出 max-height 时会被压扁成一条条细缝（文字被切一半）。
+     必须显式禁止收缩，让它老老实实溢出滚动。 */
+  #log div{flex:0 0 auto; font-family:var(--mono); font-size:11px; line-height:1.45; color:var(--muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #log .t{color:#bdbdbd; margin-right:6px}
+
+  /* ── composer ── */
+  footer{border-top:1px solid var(--line); padding:14px 20px; background:rgba(255,255,255,.9);
+    backdrop-filter:blur(8px)}
+  .composer{display:flex; gap:10px; align-items:flex-end; max-width:1100px; margin:0 auto}
+  textarea{
+    flex:1; resize:none; min-height:44px; max-height:160px; padding:12px 14px;
+    background:#fff; color:var(--text); border:1px solid var(--line);
+    border-radius:10px; font-family:var(--sans); font-size:14.5px; line-height:1.5; outline:none;
+    transition:border-color .15s;
+  }
+  textarea:focus{border-color:var(--text)}
+  textarea::placeholder{color:var(--dim)}
+  /* 主按钮：黑底白字，一个页面只该有一个这种分量的按钮 */
+  button.send{
+    height:44px; padding:0 18px; border-radius:10px;
+    border:1px solid var(--text); background:var(--text); color:#fff;
+    font-family:var(--sans); font-size:14px; cursor:pointer; transition:all .15s;
+  }
+  button.send:hover{background:#2f2f2f; border-color:#2f2f2f}
+  button.send:disabled{opacity:.35; cursor:not-allowed}
+  /* 次级按钮：白底细边，和主按钮拉开层级 */
+  button.send.ghost{
+    border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; padding:0 13px;
+  }
+  button.send.ghost:hover{color:var(--text); border-color:var(--line-strong); background:var(--bg-soft)}
+  .hint{max-width:1100px; margin:8px auto 0; font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+
+  /* ── 资料库页 ── */
+  #kb{overflow-y:auto; padding:26px 28px}
+  .kbwrap{max-width:820px; display:flex; flex-direction:column; gap:12px}
+  .kbwrap h2{margin:0; font-size:17px; font-weight:600}
+  .kbwrap h3{margin:14px 0 0; font-family:var(--mono); font-size:10.5px; font-weight:500;
+    letter-spacing:1.2px; text-transform:uppercase; color:var(--dim)}
+  .kbhint{margin:0; font-size:13px; line-height:1.7; color:var(--muted)}
+  .kbwrap input[type=text]{
+    padding:10px 12px; background:#fff; color:var(--text); border:1px solid var(--line);
+    border-radius:9px; font-family:var(--sans); font-size:13.5px; outline:none;
+  }
+  .kbwrap input[type=text]:focus{border-color:var(--text)}
+  .kbwrap textarea{max-height:none; min-height:190px}
+  .kbrow{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .kbrow input[type=file]{font-family:var(--mono); font-size:11.5px; color:var(--muted); max-width:320px}
+  ul.kbdocs li{display:flex; gap:8px; align-items:baseline}
+  ul.kbdocs .t{color:var(--text); flex:1; word-break:break-all}
+  ul.kbdocs .n{color:var(--dim); flex:none; font-size:11px}
+  ul.kbdocs li.off .t{text-decoration:line-through; color:var(--dim)}
+  ul.kbdocs button{
+    flex:none; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted);
+  }
+  ul.kbdocs button:hover{color:var(--text); border-color:var(--line-strong)}
+  ul.kbdocs .tag{
+    flex:none; font-family:var(--mono); font-size:10px; padding:1px 5px; border-radius:4px;
+    border:1px solid #e6d9b8; color:var(--warn); background:#fdf8ec;
+  }
+  /* 时效三档：待复核（黄）比已过期（红）轻一级，fresh 不打标 */
+  ul.kbdocs .tag.stale{border-color:#f0cdd0; color:var(--bad); background:#fdf1f2}
+
+  /* 导入告警（疑似密钥 / 疑似重复）与版本列表 */
+  .kbwarn{
+    font-family:var(--mono); font-size:11.5px; line-height:1.75; border-radius:8px; padding:10px 12px;
+    border:1px solid #e6d9b8; background:#fdf8ec; color:#7a5200; white-space:pre-wrap;
+  }
+  .kbvers{
+    font-family:var(--mono); font-size:11.5px; border-radius:8px; padding:10px 12px;
+    border:1px solid var(--line); background:var(--bg-soft); display:flex; flex-direction:column; gap:6px;
+  }
+  .kbvers .vrow{display:flex; gap:8px; align-items:center}
+  .kbvers .vrow .t{flex:1; color:var(--muted)}
+  .kbvers button{
+    flex:none; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted);
+  }
+  .kbvers button:hover{color:var(--text); border-color:var(--line-strong)}
+  .kbvers pre{
+    margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-all;
+    color:var(--muted); font-size:11px; line-height:1.6;
+  }
+  /* 版本 diff 的行：加绿减红，省略行灰着 */
+  .kbvers pre .dl.add{color:#0f6a2b; background:#eef8f0}
+  .kbvers pre .dl.del{color:#b3242f; background:#fdf1f2}
+  .kbvers pre .dl.same{color:var(--dim)}
+
+  /* 观测面板里的「注入正文」：审计口，展示真正拼进提示词的那几段 */
+  .kbwhy{margin-top:8px; line-height:1.7; white-space:pre-wrap}
+  .kbtoggle{
+    margin-top:6px; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted);
+  }
+  .kbtoggle:hover{color:var(--text); border-color:var(--line-strong)}
+  .kbtext{
+    margin:6px 0 0; max-height:280px; overflow:auto; white-space:pre-wrap; word-break:break-all;
+    font-family:var(--mono); font-size:11px; line-height:1.6; color:var(--muted);
+    border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--bg-soft);
+  }
+
+  /* ── 知识页：页签 + wiki 目录树 + 条目正文 ── */
+  .ktabs{display:flex; gap:6px; margin:0 0 10px}
+  .ktabs .ktab{
+    font-family:var(--sans); font-size:13px; padding:7px 14px; border-radius:9px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted); transition:all .15s;
+  }
+  .ktabs .ktab:hover{color:var(--text); border-color:var(--line-strong)}
+  .ktabs .ktab.on{background:var(--text); color:#fff; border-color:var(--text)}
+  .ktabs .ktab .n{opacity:.55; margin-left:5px; font-family:var(--mono); font-size:11px}
+
+  .wikigrid{display:grid; grid-template-columns:288px 1fr; gap:16px; align-items:start}
+  .kbgraph{display:flex; flex-direction:column; gap:12px}
+  .graphbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .graphbar .meta{flex:none}
+  .graphsearch{
+    flex:1; min-width:260px; padding:10px 12px; background:#fff; color:var(--text);
+    border:1px solid var(--line); border-radius:9px; font-family:var(--sans); font-size:13.5px; outline:none;
+  }
+  .graphsearch:focus{border-color:var(--text)}
+  .graphgrid{display:grid; grid-template-columns:280px minmax(0,1fr) 320px; gap:16px; align-items:start}
+  .graphlist{max-height:72vh; overflow:auto}
+  .graphlist .grp{font-family:var(--mono); font-size:11px; color:var(--dim); margin:8px 0 4px; user-select:none; display:flex; gap:5px; align-items:center}
+  .graphlist .grp:first-child{margin-top:0}
+  .graphtree{font-size:12.5px; color:var(--muted)}
+  .graphtree .folder{display:flex; align-items:center; gap:5px; min-height:30px; padding:3px 5px; cursor:pointer; user-select:none}
+  .graphtree .folder:hover{background:var(--bg-soft); color:var(--text)}
+  .graphtree .folder .arw{width:12px; color:var(--dim); font-size:12px}
+  .graphtree .folder .foldericon{width:18px; color:#d47a2d; font-size:16px; line-height:1}
+  .graphtree .folder .count{margin-left:auto; color:var(--dim); font-family:var(--mono); font-size:10.5px}
+  .graphtree .children{margin-left:11px; padding-left:14px; border-left:1px dashed var(--line-strong)}
+  .graphtree .children.closed{display:none}
+  .graphtree .leaf{display:flex; align-items:center; gap:7px; min-height:30px; padding:4px 6px; cursor:pointer; border-radius:6px}
+  .graphtree .leaf:hover{background:var(--bg-soft); color:var(--text)}
+  .graphtree .leaf.on{background:var(--accent-soft); color:var(--text); font-weight:500}
+  .graphtree .leaf.dim{opacity:.42}
+  .graphtree .leaf .t{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .graphtree .leaf .n{flex:none; font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+  .graphtree .leaf .dot{flex:none; width:7px; height:7px; border-radius:50%; background:#111}
+  .graphtree .leaf .dot.stale{background:var(--warn)}
+  .graphtree .leaf .dot.bad{background:var(--bad)}
+  .graphtree .leaf .dot.isolated{background:#9a9a9a}
+  .graphlist .it .n{flex:none; font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+  .graphlist .dot{background:#111}
+  .graphlist .dot.stale{background:var(--warn)}
+  .graphlist .dot.bad{background:var(--bad)}
+  .graphlist .dot.isolated{background:#9a9a9a}
+  .graphcanvas{
+    border:1px solid var(--line); border-radius:12px; padding:10px; background:#fff; overflow:auto; min-height:620px;
+  }
+  .graphsvg{
+    display:block; width:100%; min-width:880px; height:700px; border:1px solid var(--line); border-radius:10px;
+    background:radial-gradient(circle at 1px 1px, rgba(0,0,0,.08) 1px, transparent 0) 0 0 / 22px 22px, #fff;
+  }
+  .graphnode{cursor:pointer}
+  .graphnode circle{stroke:#fff; stroke-width:2px}
+  .graphnode text{font-family:var(--sans); font-size:12px; fill:var(--text)}
+  .graphnode.active circle{stroke:#111; stroke-width:3px}
+  .graphnode.dim{opacity:.18}
+  .graphedge{fill:none; stroke:rgba(17,17,17,.20); stroke-width:1.3px}
+  .graphedge.supports{stroke:#b8b8b8; stroke-dasharray:3 4; stroke-width:1.1px}
+  .graphedge.same-source{stroke:#c5c5c5; stroke-dasharray:7 4; stroke-width:1.1px}
+  .graphedge.dangling{stroke:var(--bad); stroke-dasharray:2 4; opacity:.7}
+  .graphedge.active{stroke:#111; stroke-width:2.2px; opacity:1}
+  .graphedge.dim{opacity:.10}
+  .graphnode.source-node text{fill:var(--dim); font-size:10px}
+  .graphnode.source-node circle{stroke:#fff; stroke-width:1px}
+  .graphdetail{max-height:72vh; overflow:auto}
+
+  /* ── 质检 ── */
+  .auditempty{text-align:center; padding:52px 20px; border:1px solid var(--line); border-radius:14px; background:#fff}
+  .auditempty .ic{font-size:26px; margin-bottom:14px; color:var(--muted)}
+  .auditempty p{max-width:520px; margin:0 auto 18px; font-size:13.5px; line-height:1.8; color:var(--muted)}
+  .auditempty p.sub{font-size:12px; color:var(--dim); margin-top:14px; margin-bottom:6px}
+  .send.big{font-size:14px; padding:11px 28px; height:auto}
+  .samplebox{font-size:12px; color:var(--dim); display:inline-flex; gap:5px; align-items:center; cursor:pointer}
+  .auditgrid{display:grid; grid-template-columns:170px 1fr 1fr; gap:14px; align-items:stretch; margin:12px 0}
+  .auditgrid .card{border:1px solid var(--line); border-radius:12px; padding:14px 16px; background:#fff}
+  .auditgrid .card .ct{font-family:var(--mono); font-size:11px; color:var(--dim); margin-bottom:8px}
+  .auditscorebox{display:flex; flex-direction:column; justify-content:center; align-items:center; gap:4px}
+  .auditscorebox .big{font-family:var(--mono); font-size:40px; line-height:1; color:var(--text)}
+  .auditdim{border:1px solid var(--line); border-radius:12px; padding:12px 16px; margin-bottom:8px; background:#fff}
+  .auditdim .hd{display:flex; gap:8px; align-items:baseline}
+  .auditdim .hd .nm{font-size:13px; color:var(--text); font-weight:500}
+  .auditdim .hd .sc{font-family:var(--mono); font-size:13px; margin-left:auto}
+  .auditdim .hd .w{font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+  .auditdim .bar{height:4px; border-radius:2px; background:#efefef; margin:8px 0 6px}
+  .auditdim .bar i{display:block; height:100%; border-radius:2px; background:#2b2b2b}
+  .auditdim.mid .bar i{background:#8a8a8a}
+  .auditdim.low .bar i{background:var(--bad)}
+  .auditdim .dt{font-size:12px; color:var(--muted)}
+  .auditdim ul{margin:6px 0 0; padding-left:16px}
+  .auditdim li{font-size:12px; color:var(--muted); line-height:1.7; cursor:pointer}
+  .auditdim li:hover{color:var(--text)}
+  .auditsample{border:1px solid var(--line); border-radius:12px; padding:12px 16px; margin-top:10px; background:#fff}
+  .auditsample .row{display:flex; gap:8px; align-items:baseline; font-size:12.5px; padding:3px 0}
+  .auditsample .row .s{font-family:var(--mono); font-size:11px; padding:1px 6px; border-radius:4px; background:var(--accent-soft)}
+  .auditsample .row .r{color:var(--text); cursor:pointer; text-decoration:underline; text-decoration-color:var(--line-strong)}
+
+  .wikitree{
+    border:1px solid var(--line); border-radius:12px; padding:10px; background:#fff;
+    max-height:70vh; overflow:auto;
+  }
+  .wikitree input{width:100%; margin-bottom:8px}
+  /* 分组头可点击折叠：条目涨到 20+ 之后平铺一屏放不下 */
+  .wikitree .grp{
+    font-family:var(--mono); font-size:11px; color:var(--dim); margin:8px 0 4px;
+    cursor:pointer; user-select:none; display:flex; gap:5px; align-items:center;
+  }
+  .wikitree .grp:hover{color:var(--text)}
+  /* 折叠箭头：类名不能叫 caret——全局 .caret 是流式输出的那个闪烁光标
+     （带 background 和 blink 动画），撞上之后箭头会变成一个闪烁的黑块 */
+  .wikitree .grp .arw{display:inline-block; width:9px; transition:transform .12s}
+  .wikitree .grp.closed .arw{transform:rotate(-90deg)}
+  .wikitree .it{
+    display:flex; gap:6px; align-items:center; padding:5px 7px; border-radius:7px; cursor:pointer;
+    font-size:12.5px; color:var(--muted); border:1px solid transparent;
+  }
+  .wikitree .it:hover{background:var(--bg-soft); color:var(--text)}
+  .wikitree .it.on{background:var(--accent-soft); border-color:var(--line-strong); color:var(--text); font-weight:500}
+  .wikitree .it .t{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  /* 状态点：绿=正常，黄=原文变了要重建，红=溯源校验没过 */
+  .wikitree .dot{flex:none; width:7px; height:7px; border-radius:50%; background:var(--ok)}
+  .wikitree .dot.stale{background:var(--warn)}
+  .wikitree .dot.bad{background:var(--bad)}
+  .wikitree .files{margin-top:10px; border-top:1px solid var(--line); padding-top:8px}
+
+  .wikipage{border:1px solid var(--line); border-radius:12px; padding:16px 18px; min-height:200px; background:#fff}
+  .wikipage .crumb{font-family:var(--mono); font-size:11.5px; color:var(--dim); margin-bottom:10px}
+  .wikipage .ops{display:flex; gap:6px; margin-bottom:12px}
+  .wikipage .ops button{
+    font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted);
+  }
+  .wikipage .ops button:hover{color:var(--text); border-color:var(--line-strong)}
+  .wikipage .ops button.danger:hover{color:var(--bad); border-color:#f0cdd0}
+  .wikicard{
+    border:1px solid var(--line); border-left:3px solid var(--text); border-radius:8px;
+    padding:12px 16px; margin-bottom:14px; background:var(--bg-soft);
+  }
+  .wikicard .badge{
+    display:inline-block; font-family:var(--mono); font-size:10px; padding:2px 7px; border-radius:4px;
+    background:var(--text); color:#fff; margin-bottom:8px; letter-spacing:.5px;
+  }
+  .wikicard .sum{font-size:14px; color:var(--text); margin-bottom:10px; line-height:1.6}
+  .wikicard .kv{display:flex; gap:10px; font-family:var(--mono); font-size:11.5px; margin-top:4px}
+  .wikicard .kv .k{color:var(--dim); flex:none; width:56px}
+  .wikicard .kv .v{color:var(--muted)}
+  .wikicard .kv .v a{color:var(--text); cursor:pointer; text-decoration:underline;
+    text-decoration-color:var(--line-strong); margin-right:8px}
+  .wikicard .kv .v a:hover{text-decoration-color:var(--text)}
+  .wikicard .kv .v.bad{color:var(--bad)}
+  .wikicard .kv .v.ok{color:var(--ok)}
+  .wikiedit{width:100%; min-height:280px; font-family:var(--mono); font-size:12px}
+
+  /* 极简 Markdown 渲染的产物（正文用 DOM 拼，不用 innerHTML） */
+  .md h1,.md h2,.md h3{color:var(--text); margin:16px 0 8px; line-height:1.4}
+  .md h1{font-size:19px} .md h2{font-size:16px} .md h3{font-size:14px}
+  .md p{margin:8px 0; line-height:1.8; color:#2b2b2b}
+  .md ul{margin:8px 0; padding-left:20px}
+  .md li{margin:4px 0; line-height:1.7; color:#2b2b2b}
+  .md code{font-family:var(--mono); font-size:12px; background:var(--accent-soft); padding:1px 5px; border-radius:4px}
+  .md pre{
+    font-family:var(--mono); font-size:12px; background:var(--bg-soft); border:1px solid var(--line);
+    border-radius:8px; padding:10px 12px; overflow:auto; white-space:pre-wrap;
+  }
+  .md blockquote{
+    margin:8px 0; padding:6px 12px; border-left:2px solid var(--line-strong);
+    color:var(--muted); font-size:12.5px; line-height:1.7;
+  }
+  .md .cite{font-family:var(--mono); font-size:11px; color:var(--muted); cursor:pointer;
+    text-decoration:underline; text-decoration-color:var(--line-strong)}
+  .md .wlink{color:var(--text); cursor:pointer; text-decoration:underline; text-decoration-color:var(--line-strong)}
+  .md .state{font-family:var(--mono); font-size:11px; padding:1px 5px; border-radius:4px; margin-right:4px}
+  .md .state.no{background:#fdf1f2; color:var(--bad)}
+  .md .state.old{background:#fdf8ec; color:var(--warn)}
+  .md .state.tbd{background:var(--accent-soft); color:var(--muted)}
+
+  /* ── 侧边栏「最近对话」 ── */
+  ul.recents li{display:block; cursor:pointer; border-radius:7px; padding:5px 7px; border:1px solid transparent}
+  ul.recents li:hover{background:var(--bg-soft)}
+  ul.recents li.on{background:var(--accent-soft); border-color:var(--line-strong)}
+  ul.recents li.empty{cursor:default}
+  ul.recents .t{display:block; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  ul.recents .n{display:block; color:var(--dim); font-size:10.5px; margin-top:2px}
+
+  /* 会话条目上的「改名 / 删除」：平时藏着，鼠标移上去才出现 */
+  .ops{display:none; gap:6px; margin-top:4px}
+  li:hover > .ops{display:flex}
+  .ops button{
+    font-family:var(--mono); font-size:10px; padding:2px 7px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted); transition:all .15s;
+  }
+  .ops button:hover{color:var(--text); border-color:var(--line-strong)}
+  .ops button.danger:hover{color:var(--bad); border-color:#f0cdd0}
+  .ops button:disabled{opacity:.35; cursor:not-allowed}
+
+  /* 资料库页 / 轨迹页不需要右侧观测面板（那些是「跑一个回合时」才有意义的东西） */
+  body.nopanel main{grid-template-columns:minmax(0,1fr)}
+  body.nopanel aside{display:none}
+
+  /* 历史会话只读预览时顶部的横幅 */
+  .banner{
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:9px 12px; border-radius:9px;
+    background:#fdf8ec; border:1px solid #e6d9b8;
+    font-family:var(--mono); font-size:11.5px; color:#7a5200;
+  }
+  .banner .grow{flex:1; min-width:120px; color:var(--muted)}
+  .banner button{
+    font-family:var(--mono); font-size:10.5px; padding:3px 9px; border-radius:6px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted); transition:all .15s;
+  }
+  .banner button:hover{color:var(--text); border-color:var(--line-strong)}
+
+  /* 资料库条目上的操作按钮：这一排常显（不像会话列表那样 hover 才出） */
+  .ops.kbops{display:flex; margin-top:6px}
+
+  /* ── 会话轨迹页 ── */
+  #sess{overflow-y:auto; padding:26px 28px}
+  .kbwrap.wide{max-width:1180px}
+
+  /* 汇总状态栏 */
+  .sumbar{
+    display:flex; flex-wrap:wrap; gap:6px 16px; padding:9px 12px; border-radius:9px;
+    background:#fff; border:1px solid var(--line);
+    font-family:var(--mono); font-size:11.5px; color:var(--muted);
+  }
+  .sumbar b{color:var(--text); font-weight:600}
+  .sumbar .warn{color:var(--warn)}
+
+  /* 时间轴：一行一个回合，内部按 模型/工具/审批 分段。
+     黑白风格下不用色相区分，改用深浅：模型=深、工具=中、审批=浅 + 斜纹感 */
+  .overview{display:flex; flex-direction:column; gap:4px; user-select:none; position:relative}
+  .ovrow{display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+  .ovrow .lab{flex:none; width:52px; text-align:right; cursor:pointer}
+  .ovrow .lab:hover{color:var(--text)}
+  .ovtrack{position:relative; flex:1; height:14px; background:var(--bg-soft); border:1px solid var(--line); border-radius:4px}
+  .ovseg{position:absolute; top:0; bottom:0; border-radius:3px}
+  .ovseg.llm{background:#2b2b2b}
+  .ovseg.ttft{background:#9a9a9a}
+  .ovseg.tool{background:#6b6b6b}
+  .ovseg.approval{background:var(--warn); opacity:.75}
+  .ovsel{position:absolute; top:0; bottom:0; background:rgba(0,0,0,.06); border-left:1px solid var(--text);
+    border-right:1px solid var(--text); pointer-events:none}
+
+  /* 工具条 */
+  .tracebar{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+  .tracebar input[type=text]{
+    flex:1; min-width:160px; height:30px; padding:0 10px; background:#fff; color:var(--text);
+    border:1px solid var(--line); border-radius:8px; font-family:var(--mono); font-size:11.5px; outline:none;
+  }
+  .tracebar input[type=text]:focus{border-color:var(--text)}
+  .tracebar .send{height:30px; padding:0 12px; font-size:12px}
+  .chip.f{cursor:pointer; user-select:none}
+  .chip.f.off{opacity:.4}
+
+  /* 账本 */
+  .ledger{
+    max-height:460px; overflow:auto; border:1px solid var(--line); border-radius:10px; background:#fff;
+    font-family:var(--mono); font-size:11.5px;
+  }
+  .ledger .turnhead{
+    position:sticky; top:0; z-index:1; display:flex; gap:10px; align-items:baseline; cursor:pointer;
+    padding:7px 10px; background:var(--bg-soft); border-top:1px solid var(--line-strong); color:var(--text);
+  }
+  .ledger .turnhead:first-child{border-top:none}
+  .ledger .turnhead .q{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .ledger .turnhead .st{flex:none; color:var(--dim); font-size:10.5px}
+  .ledger .betweenhead{padding:5px 10px; color:var(--dim); background:#f7f7f7; border-top:1px solid var(--line)}
+  .ledger .row{display:flex; gap:8px; padding:4px 10px; cursor:pointer; border-left:2px solid transparent}
+  .ledger .row:hover{background:var(--bg-soft)}
+  .ledger .row.on{background:var(--accent-soft); border-left-color:var(--text)}
+  .ledger .row .sq{flex:none; width:44px; color:var(--dim); text-align:right}
+  .ledger .row .lb{flex:none; width:104px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted)}
+  .ledger .row .sm{flex:1; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .ledger .row .tm{flex:none; color:var(--dim)}
+  /* 角色不用色相区分（黑白风格），用字重 + 深浅：用户/模型最重，其它一律中性 */
+  .ledger .row.k-user .lb{color:var(--text); font-weight:600}
+  .ledger .row.k-assistant .lb{color:var(--text)}
+  .ledger .row.k-tool .lb{color:#3f3f3f}
+  .ledger .row.k-approval .lb{color:var(--warn)}
+  .ledger .row.k-memory .lb{color:#3f3f3f}
+  .ledger .row.k-kb .lb{color:#3f3f3f}
+  .ledger .row.k-web .lb{color:#3f3f3f}
+  .ledger .row.k-subagent .lb{color:#3f3f3f}
+  .ledger .row.bad .sm{color:var(--bad)}
+  .ledger .more{width:100%; padding:6px 10px; background:#fff; border:none; border-bottom:1px solid var(--line);
+    color:var(--text); font-family:var(--mono); font-size:11px; cursor:pointer; text-align:left}
+  .ledger .more:disabled{color:var(--dim); cursor:default}
+  .ledger .empty{padding:10px; color:var(--dim)}
+
+  /* 详情 */
+  .inspect{
+    max-height:300px; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--bg-soft);
+    padding:10px 12px; font-family:var(--mono); font-size:11px; line-height:1.6; color:var(--muted);
+    white-space:pre-wrap; word-break:break-all;
+  }
+  .inspect .k{color:var(--text)}
+  ul.sesslist li{display:flex; gap:8px; align-items:baseline; cursor:pointer; border-radius:7px; padding:4px 7px;
+    border:1px solid transparent}
+  ul.sesslist li:hover{background:var(--bg-soft)}
+  ul.sesslist li.on{background:var(--accent-soft); border-color:var(--line-strong)}
+  ul.sesslist .t{color:var(--text); flex:1; word-break:break-all}
+  ul.sesslist .n{color:var(--dim); flex:none; font-size:11px}
+  ul.sesslist .cur{color:var(--ok); flex:none; font-size:10.5px}
+  .tracewrap{display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:18px; margin-top:4px}
+  pre.tracelines{
+    margin:0; max-height:340px; overflow:auto; background:var(--bg-soft); border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px; font-family:var(--mono); font-size:11px; line-height:1.65;
+    color:var(--muted); white-space:pre-wrap; word-break:break-all;
+  }
+  ul.msgs{max-height:340px; overflow:auto}
+  ul.msgs li{display:block; padding:4px 0; border-bottom:1px solid var(--line)}
+  ul.msgs .r{font-family:var(--mono); font-size:10px; letter-spacing:.6px; text-transform:uppercase; color:var(--dim)}
+  ul.msgs .c{display:block; color:#2b2b2b; white-space:pre-wrap; word-break:break-all; margin-top:2px}
+
+  /* ── approval modal ── */
+  #veil{position:fixed; inset:0; background:rgba(255,255,255,.7); backdrop-filter:blur(3px);
+    display:none; align-items:center; justify-content:center; z-index:20}
+  #veil.show{display:flex}
+  .card{
+    width:min(620px,92vw); background:#fff; border:1px solid var(--line-strong); border-radius:14px;
+    box-shadow:0 18px 50px rgba(0,0,0,.14); overflow:hidden; animation:rise .18s ease both;
+  }
+  .card .top{padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px}
+  .badge{font-family:var(--mono); font-size:10.5px; letter-spacing:.8px; padding:3px 8px; border-radius:5px;
+    text-transform:uppercase}
+  .badge.confirm{color:#7a5200; background:#fdf8ec; border:1px solid #e6d9b8}
+  .badge.dangerous{color:#b3242f; background:#fdf1f2; border:1px solid #f0cdd0}
+  .card .top .t{font-size:14px}
+  .card .mid{padding:16px 20px; max-height:46vh; overflow-y:auto}
+  .card .reason{font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-bottom:12px}
+  pre.diff{margin:0; font-family:var(--mono); font-size:12px; line-height:1.55; white-space:pre-wrap;
+    background:var(--bg-soft); border:1px solid var(--line); border-radius:8px; padding:12px}
+  pre.diff .a{color:#0f6a2b} pre.diff .d{color:#b3242f}
+  .card .bot{padding:14px 20px; border-top:1px solid var(--line); display:flex; gap:10px; justify-content:flex-end}
+  .btn{padding:8px 16px; border-radius:9px; font-family:var(--sans); font-size:13.5px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--muted); transition:all .15s}
+  .btn:hover{color:var(--text); border-color:var(--line-strong)}
+  /* 放行是这个弹窗里的主操作，用黑底白字；拒绝保持次级 */
+  .btn.allow{border-color:var(--text); background:var(--text); color:#fff}
+  .btn.allow:hover{background:#2f2f2f; border-color:#2f2f2f}
+
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#dcdcdc; border-radius:6px}
+  ::-webkit-scrollbar-thumb:hover{background:#c4c4c4}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <span class="logo">Glass-Box <span>· 可观测的迷你 coding agent</span></span>
+  <span class="nav">
+    <button id="navchat" class="on">对话</button>
+    <button id="navkb">知识</button>
+    <button id="navsess">会话轨迹</button>
+  </span>
+  <span class="right" id="hostinfo"></span>
+</header>
+
+<main>
+  <section id="chat"></section>
+
+  <section id="kb" hidden>
+    <div class="kbwrap wide">
+      <h2>知识</h2>
+      <div class="ktabs">
+        <button class="ktab on" id="tabwiki">wiki 知识 <span class="n" id="wikicount">0</span></button>
+        <button class="ktab" id="tabgraph">图谱 <span class="n" id="graphcount">0</span></button>
+        <button class="ktab" id="tabaudit">质检 <span class="n" id="auditscore">–</span></button>
+        <button class="ktab" id="tabraw">原始文档 <span class="n" id="rawcount">0</span></button>
+      </div>
+    </div>
+
+    <!-- ── wiki 知识：左目录树 + 右条目 ── -->
+    <div class="kbwrap wide" id="kbwiki">
+      <p class="kbhint">
+        wiki 是<b>原文之上的一层</b>：模型把导入的资料编译成条目（结论先行 + 每条结论带原文出处），
+        存成 <code>.glassbox/kb/wiki/**.md</code> 普通 Markdown 文件——可以用编辑器直接改、可以 git 管。
+        和资料库的关系是「原文 → 编译 → 条目」，原文永久保留，条目随时可以重新编译。
+      </p>
+      <p class="kbhint">
+        生成后会过一道<b>不调模型的溯源校验</b>：条目里出现的每个数字和标识符，必须能在它引用的原文块里
+        一字不差地找到，找不到就标「未通过校验」——LLM 编译知识最大的风险是编造，这道闸是机械的。
+        生成规则写在 <code>.glassbox/kb/wiki/AGENTS.md</code>（首次生成时从仓库模板复制），改它就改下次生成结果。
+      </p>
+      <div class="kbrow">
+        <button class="send" id="wikibuild" title="让模型把所有启用中的资料编译成条目（要调模型，按页面数量计费）">生成 wiki</button>
+        <button class="send" id="wikistale" title="只重建依据原文已改动的条目（原文重导入后条目还在说旧话）" hidden>重建过期条目</button>
+        <button class="send" id="wikisum" title="给缺摘要 / 别名不足 3 个的条目补上（只补这两个字段，不重写正文）">补摘要与别名</button>
+        <span class="meta" id="wikistatus"></span>
+      </div>
+      <div class="wikigrid">
+        <div class="wikitree">
+          <input type="text" id="wikifilter" placeholder="搜索条目名 / 摘要…" />
+          <div id="wikitreebox"><div class="empty">还没有条目</div></div>
+        </div>
+        <div class="wikipage" id="wikipagebox">
+          <div class="empty">从左边选一条看看，或者先点「生成 wiki」</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="kbwrap wide" id="kbgraph" hidden>
+      <p class="kbhint">
+        图谱由 wiki 页面、原文块和派生关系组成：实线是条目引用，虚线是来源支撑或同源关系。
+        点击页面节点会同步到右侧详情，并可以一键跳回 wiki 条目页。
+      </p>
+      <div class="kbrow graphbar">
+        <input type="text" id="graphfilter" class="graphsearch" placeholder="搜索条目名 / 摘要 / 回链…" />
+        <label class="samplebox"><input type="checkbox" id="graphstale" checked /> 显示过期</label>
+        <label class="samplebox"><input type="checkbox" id="graphisolated" checked /> 显示孤立</label>
+        <span class="meta" id="graphstatus"></span>
+      </div>
+      <div class="graphgrid">
+        <div class="wikitree graphlist">
+          <div class="meta" style="margin-bottom:8px">目录 <span class="n" id="graphcount2">0</span></div>
+          <div id="graphlist"><div class="empty">还没有条目</div></div>
+        </div>
+        <div class="graphcanvas">
+          <div class="kbrow" style="justify-content:space-between; margin-bottom:10px">
+            <span class="meta">黑色=普通，黄点=过期，红点=未通过校验，灰点=孤立</span>
+          </div>
+          <svg id="graphsvg" class="graphsvg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div class="wikipage graphdetail" id="graphdetail">
+          <div class="empty">从图里选一个条目</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 质检：综合分 + 五维雷达 + 30 天趋势 ── -->
+    <div class="kbwrap wide" id="kbaudit" hidden>
+      <div id="auditempty" class="auditempty">
+        <div class="ic">📋</div>
+        <p>这个知识库还没有做过质量评估。点下面的按钮跑一次，就能看到综合分、五维雷达与 30 天趋势。</p>
+        <button class="send big" id="auditrun">▶ 开始评估</button>
+        <p class="sub">五个维度都是机械计算、秒级完成；勾上「模型抽检」会额外调模型评几条条目的写作质量。</p>
+        <label class="samplebox"><input type="checkbox" id="auditsample" checked /> 模型抽检 3 条（要调模型、按条计费）</label>
+      </div>
+      <div id="auditbody" hidden>
+        <div class="kbrow">
+          <button class="send" id="auditrun2">重新评估</button>
+          <label class="samplebox"><input type="checkbox" id="auditsample2" checked /> 模型抽检 3 条</label>
+          <span class="meta" id="auditstatus"></span>
+        </div>
+        <div class="auditgrid">
+          <div class="card auditscorebox">
+            <div class="big" id="auditbig">–</div>
+            <div class="meta">综合分 / 100</div>
+            <div class="meta" id="auditmeta"></div>
+          </div>
+          <div class="card"><div class="ct">五维雷达</div><div id="auditradar"></div></div>
+          <div class="card"><div class="ct">30 天趋势</div><div id="audittrend"></div>
+            <div class="meta">只画机械分。模型抽检会抖，混进曲线会让趋势失真。</div></div>
+        </div>
+        <div id="auditdims"></div>
+        <div id="auditsamplebox"></div>
+      </div>
+    </div>
+
+    <!-- ── 原始文档：就是原来的资料库 ── -->
+    <div class="kbwrap" id="kbraw" hidden>
+      <p class="kbhint">
+        粘贴文本或选择 <code>.md</code> / <code>.txt</code> 文件导入。导入后按 Markdown 标题切块建索引，
+        之后你在对话里提问时会自动检索并注入相关段落，注入了哪几段可以在对话页右侧「资料库」面板里看到。
+        原文保存在 <code>.glassbox/kb/raw/</code>，同名重复导入 = 版本递增、旧分块整体替换。
+      </p>
+      <p class="kbhint">
+        <b>资料库是整个工作区共用的</b>：导入一次，之后所有会话（包括新建的、分叉出来的、以及重启进程之后的）
+        都能检索到它，不属于某一次对话。它和「记忆」的区别是——资料库是你主动喂进来的原始资料，
+        记忆是从对话里自动蒸馏出来的零碎结论。
+      </p>
+      <p class="kbhint">
+        除了自动注入，模型还能主动调 <code>kb_search</code>（换关键词再查）、<code>kb_read</code>（读某篇/某章全文）、
+        <code>kb_answer</code>（只按资料作答并附来源）。导入时会顺手扫一遍疑似密钥和疑似重复，只提示不拦；
+        每篇的 <code>v?</code> 按钮能看历史版本、和当前版本逐行对比、必要时回滚；
+        30~60 天没更新标「待复核」，超过 60 天标「已过期」。
+        点「蒸馏」会让模型给每篇资料生成一段摘要和一串别名：它<b>只参与检索打分、永远不会被注入</b>，
+        作用是问法和原文用词不一致时（「获取锁超时」vs 原文「抢锁失败」）还能把真正写着答案的段落捞出来。
+      </p>
+      <input type="text" id="kbtitle" placeholder="标题（留空则自动取第一个 # 标题或文件名）" />
+      <textarea id="kbtext" placeholder="把资料粘贴到这里…"></textarea>
+      <div class="kbrow">
+        <input type="file" id="kbfile" multiple accept=".md,.markdown,.txt,.text" />
+        <button class="send" id="kbimport">导入</button>
+        <button class="send ghost" id="kbcancel" hidden>取消编辑</button>
+        <button class="send ghost" id="kbreindex" title="按当前切块参数把所有资料重新切一遍（内容不变、版本号不变）">重新索引</button>
+        <button class="send ghost" id="kbdistill" title="让模型给还没蒸馏的资料生成「摘要+别名」索引块：只参与检索打分，不会被注入">蒸馏</button>
+        <button class="send ghost" id="kbctx" title="给每一块补「一句话上下文 + 状态（现行/已否决/历史）」：进检索语料，注入时标出状态">补块上下文</button>
+        <span class="meta" id="kbstatus"></span>
+      </div>
+      <div class="kbwarn" id="kbwarn" hidden></div>
+      <h3>已导入</h3>
+      <ul class="list kbdocs" id="kbdocs"><li class="empty">暂无</li></ul>
+      <div class="kbvers" id="kbvers" hidden></div>
+    </div>
+  </section>
+
+  <section id="sess" hidden>
+    <div class="kbwrap wide">
+      <h2>会话轨迹</h2>
+      <p class="kbhint">
+        每个会话的事件都按行追加在 <code>.glassbox/sessions/&lt;id&gt;.jsonl</code> 里，只追加、不修改。
+        下面的轨迹是从这些事件<b>算</b>出来的：按回合分层、模型/工具各自的耗时、首 token 延迟、真实 token 用量。
+        点某一行可以看它的完整输入输出，并把「当时的对话状态」和分叉点定到那一步。
+      </p>
+      <h3>会话列表</h3>
+      <ul class="list sesslist" id="sesslist"><li class="empty">暂无</li></ul>
+
+      <div id="sessdetail" hidden>
+        <h3 id="sesstitle"></h3>
+        <div class="sumbar" id="sesssummary"></div>
+
+        <h3>时间轴（每行一个回合，拖选可只看某段时间）</h3>
+        <div class="overview" id="sessoverview"></div>
+
+        <div class="tracebar">
+          <span class="chips" id="sessfilters"></span>
+          <input type="text" id="sesssearch" placeholder="搜索这一页的事件…" />
+          <span class="meta" id="sessmeta"></span>
+          <button class="send ghost" id="sessraw">原始日志</button>
+          <button class="send" id="sessfork">从选中这一步分叉</button>
+        </div>
+
+        <div class="tracewrap">
+          <div>
+            <div class="ledger" id="sessledger"></div>
+            <pre class="tracelines" id="sesslines" hidden></pre>
+          </div>
+          <div>
+            <h3>选中这一步的详情</h3>
+            <div class="inspect" id="sessinspect">点账本里的任意一行</div>
+            <h3>该步的对话状态</h3>
+            <ul class="list msgs" id="sessmsgs"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="sec">
+      <h3>最近对话</h3>
+      <ul class="list recents" id="recents"><li class="empty">—</li></ul>
+    </div>
+
+    <div class="sec">
+      <h3>状态机</h3>
+      <div class="chips" id="states"></div>
+    </div>
+
+    <div class="sec">
+      <h3>活动轨迹</h3>
+      <div class="meta" id="actmeta">暂无活动</div>
+      <ul class="list act" id="acts" style="margin-top:8px"></ul>
+    </div>
+
+    <div class="sec">
+      <h3>上下文预算</h3>
+      <div class="bar" id="ctxbar"><i></i></div>
+      <div class="meta" id="ctxmeta">—</div>
+      <ul class="list" id="compactions" style="margin-top:8px"></ul>
+    </div>
+
+    <div class="sec">
+      <h3>Skills</h3>
+      <ul class="list" id="skills"><li class="empty">—</li></ul>
+    </div>
+
+    <div class="sec">
+      <h3>记忆</h3>
+      <div class="meta" id="memmeta">—</div>
+      <ul class="list" id="mem" style="margin-top:8px"></ul>
+    </div>
+
+    <div class="sec">
+      <h3>资料库</h3>
+      <div class="meta" id="kbmeta">—</div>
+      <ul class="list" id="kbhits" style="margin-top:8px"></ul>
+      <!-- 检索口径：查询串是去过停用词、可能拼了上一轮关键词之后的，不是用户原话 -->
+      <div class="meta kbwhy" id="kbwhy" hidden></div>
+      <button class="kbtoggle" id="kbshowtext" hidden>查看注入正文</button>
+      <pre class="kbtext" id="kbtext-injected" hidden></pre>
+    </div>
+
+    <div class="sec">
+      <h3>工具调用</h3>
+      <ul class="list" id="tools"><li class="empty">暂无</li></ul>
+    </div>
+
+    <div class="sec" id="subsec" hidden>
+      <h3>子 Agent</h3>
+      <ul class="list" id="subs"></ul>
+    </div>
+
+    <div class="sec">
+      <h3>审批</h3>
+      <ul class="list" id="approvals"><li class="empty">无需审批</li></ul>
+    </div>
+
+    <div class="sec">
+      <h3>事件流</h3>
+      <div id="log"></div>
+    </div>
+  </aside>
+</main>
+
+<footer id="composer">
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="说点什么…  例如：请在代码库里搜索 StreamGate"></textarea>
+    <button class="send ghost" id="newsess" title="开一个空白会话：不带任何上文，记忆里的偏好/禁令仍然生效">+ 新会话</button>
+    <button class="send ghost" id="stop" title="掐掉当前回合：已经做过的步骤留在历史里，可以接着聊" hidden>停止</button>
+    <button class="send" id="send">发送</button>
+  </div>
+  <div class="hint">Enter 发送 · Shift+Enter 换行 · 有风险的操作会弹窗请你确认 · 回合跑飞了点「停止」</div>
+</footer>
+
+<div id="veil">
+  <div class="card">
+    <div class="top"><span class="badge" id="mlevel">confirm</span><span class="t" id="msummary"></span></div>
+    <div class="mid">
+      <div class="reason" id="mreason" hidden></div>
+      <pre class="diff" id="mdiff" hidden></pre>
+    </div>
+    <div class="bot">
+      <button class="btn" id="mdeny">拒绝</button>
+      <button class="btn" id="malways" title="本会话内同类调用不再问（危险操作与关键配置文件不提供这个选项）" hidden>始终允许</button>
+      <button class="btn allow" id="mallow">允许</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
+const chat = $('#chat'), logBox = $('#log');
+document.getElementById('hostinfo').textContent = location.host;
+
+const STATES = ['idle','thinking','tool_call','tool_result','done'];
+const stateEls = {};
+for (const s of STATES) {
+  const c = el('span','chip'); c.textContent = s; stateEls[s] = c; $('#states').appendChild(c);
+}
+
+const S = {
+  skills: [], activated: new Set(), memTotal: 0,
+  tools: [], subs: [], approvals: [], compactions: [], acts: [],
+  streamed: false, aiBody: null,
+  kbDocs: 0, kbChunks: 0,
+};
+
+/* ── 页面切换：对话 / 资料库 / 会话轨迹 ── */
+const PAGES = ['chat', 'kb', 'sess'];
+function showPage(which) {
+  for (const p of PAGES) {
+    $('#' + p).hidden = p !== which;
+    $('#nav' + p).classList.toggle('on', p === which);
+  }
+  if (which === 'kb') { loadKbDocs(); loadWikiTree(); }
+  if (which === 'sess') loadSessions().then(() => autoOpenTrace());
+  // 发消息只在对话页：输入框整条（含「+ 新会话」）跟着页面走
+  $('#composer').hidden = which !== 'chat';
+  // 资料库页和会话轨迹页都不显示右侧观测面板：
+  // 状态机/活动轨迹是「跑回合时」才有意义的，而轨迹页需要横向空间
+  document.body.classList.toggle('nopanel', which === 'kb' || which === 'sess');
+}
+for (const p of PAGES) $('#nav' + p).onclick = () => { location.hash = p; showPage(p); };
+// 支持 #kb / #sess 直接进某一页（刷新后还在原来那页，也方便截图/分享）
+window.addEventListener('hashchange', () => {
+  const p = location.hash.replace('#', '');
+  if (PAGES.includes(p)) showPage(p);
+});
+
+/* ── 知识页：wiki 条目 ── */
+
+/** 当前选中的条目 / 树数据 / 是否在编辑态 */
+/* collapsed：折叠起来的分组 key。存 localStorage，刷新页面后还记得——
+ * 条目从 8 条涨到 22 条之后，每次刷新都要重新折一遍太烦人 */
+const WIKI = {
+  ref: null,
+  tree: null,
+  editing: false,
+  collapsed: new Set(JSON.parse(localStorage.getItem('gb.wiki.collapsed') || '[]')),
+};
+const GRAPH = {
+  ref: null,
+  data: null,
+  query: '',
+  collapsed: new Set(JSON.parse(localStorage.getItem('gb.graph.collapsed') || '[]')),
+  showStale: true,
+  showIsolated: true,
+};
+
+/** 页签切换：wiki 知识 / 原始文档 */
+function showKbTab(which) {
+  $('#kbwiki').hidden = which !== 'wiki';
+  $('#kbgraph').hidden = which !== 'graph';
+  $('#kbaudit').hidden = which !== 'audit';
+  $('#kbraw').hidden = which !== 'raw';
+  $('#tabwiki').classList.toggle('on', which === 'wiki');
+  $('#tabgraph').classList.toggle('on', which === 'graph');
+  $('#tabaudit').classList.toggle('on', which === 'audit');
+  $('#tabraw').classList.toggle('on', which === 'raw');
+  if (which === 'graph') loadWikiGraph();
+  if (which === 'audit') loadAudit();
+}
+$('#tabwiki').onclick = () => showKbTab('wiki');
+$('#tabgraph').onclick = () => showKbTab('graph');
+$('#tabaudit').onclick = () => showKbTab('audit');
+$('#tabraw').onclick = () => showKbTab('raw');
+
+/**
+ * 极简 Markdown → DOM。
+ *
+ * 为什么自己写：这个项目零依赖，装不了 marked。
+ * 为什么不用 innerHTML：条目内容来自资料原文 + 模型输出，直接塞 innerHTML
+ * 等于给自己开一个 XSS 入口。所以全程 createElement + textContent。
+ * 只支持条目里真的会用到的语法：# 标题、列表、引用、代码块、行内码、加粗，
+ * 加上三个我们自己的记号——[[条目链接]]、[文档#块号] 出处、[被否决] 状态标记。
+ */
+const MD_INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[\[[^\]]+\]\])|(\[[^\][]*#\d+\])|(\[(?:现行|被否决|历史|待确认)\])/g;
+const STATE_CLS = { '被否决': 'no', '历史': 'old', '待确认': 'tbd', '现行': '' };
+
+function mdInline(target, text) {
+  let last = 0;
+  for (const m of String(text).matchAll(MD_INLINE)) {
+    if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
+    last = m.index + m[0].length;
+    const tok = m[0];
+    if (tok.startsWith('`')) {
+      const c = el('code'); c.textContent = tok.slice(1, -1); target.appendChild(c);
+    } else if (tok.startsWith('**')) {
+      const b = el('b'); b.textContent = tok.slice(2, -2); target.appendChild(b);
+    } else if (tok.startsWith('[[')) {
+      const ref = tok.slice(2, -2).trim();
+      const a = el('span','wlink'); a.textContent = ref;
+      a.onclick = () => openWikiPage(ref);
+      target.appendChild(a);
+    } else if (tok.includes('#')) {
+      // 出处标记：点了跳到「原始文档」页签并把那篇原文读出来
+      const inner = tok.slice(1, -1);
+      const a = el('span','cite'); a.textContent = '[' + inner + ']';
+      a.title = '看这一段的原文';
+      a.onclick = () => jumpToSource(inner);
+      target.appendChild(a);
+    } else {
+      const word = tok.slice(1, -1);
+      const s = el('span','state ' + (STATE_CLS[word] || '')); s.textContent = word;
+      target.appendChild(s);
+    }
+  }
+  if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function renderMd(text) {
+  const root = el('div','md');
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++;
+      const pre = el('pre'); pre.textContent = buf.join('\n'); root.appendChild(pre);
+      continue;
+    }
+    const h = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (h) {
+      const tag = el('h' + h[1].length); mdInline(tag, h[2]); root.appendChild(tag);
+      i++;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ''));
+      const q = el('blockquote'); q.textContent = buf.join('\n'); root.appendChild(q);
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const ul = el('ul');
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        const li = el('li'); mdInline(li, lines[i].replace(/^\s*[-*]\s+/, '')); ul.appendChild(li);
+        i++;
+      }
+      root.appendChild(ul);
+      continue;
+    }
+    if (!line.trim()) { i++; continue; }
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,3}\s|>|\s*[-*]\s|```)/.test(lines[i])) buf.push(lines[i++]);
+    const p = el('p'); mdInline(p, buf.join('\n')); root.appendChild(p);
+  }
+  return root;
+}
+
+/** 出处 `调度服务-sdd#2` → 切到原始文档页签，把那篇原文读出来 */
+async function jumpToSource(sourceRef) {
+  const docId = String(sourceRef).split('#')[0];
+  showKbTab('raw');
+  try {
+    const r = await fetch('/kb/raw?id=' + encodeURIComponent(docId));
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+    $('#kbstatus').textContent = `已打开《${d.title}》v${d.version} 的原文（出处 ${sourceRef}）`;
+    const box = $('#kbvers');
+    box.hidden = false;
+    box.innerHTML = '';
+    const head = el('div','vrow');
+    const t = el('span','t'); t.textContent = `《${d.title}》原文 · 出处 ${sourceRef}`;
+    const close = el('button'); close.textContent = '收起';
+    close.onclick = () => { box.hidden = true; box.innerHTML = ''; };
+    head.append(t, close); box.appendChild(head);
+    const pre = el('pre'); pre.textContent = d.text; box.appendChild(pre);
+    box.scrollIntoView({ block: 'center' });
+  } catch (e) {
+    $('#kbstatus').textContent = '读原文失败: ' + e.message;
+  }
+}
+
+async function loadWikiTree() {
+  try {
+    const r = await fetch('/wiki/tree');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+    WIKI.tree = d;
+    $('#wikicount').textContent = d.total;
+    $('#graphcount').textContent = d.total;
+    // 过期条目数：有几条就把「重建过期条目」露出来（没有就藏着，少一个没用的按钮）
+    const stale = (d.groups || []).reduce((n, g) => n + g.pages.filter(p => p.stale).length, 0);
+    const staleBtn = $('#wikistale');
+    staleBtn.hidden = stale === 0;
+    staleBtn.textContent = `重建过期条目（${stale}）`;
+    renderWikiTree();
+    if ($('#kbgraph').hidden === false) loadWikiGraph();
+  } catch (e) {
+    $('#wikistatus').textContent = '读取条目树失败: ' + e.message;
+  }
+}
+
+/* 折叠分组：只影响这棵树的显示，不动任何条目内容。
+ * 搜索的时候强制全展开——不然过滤命中的条目藏在折叠组里，等于搜不到。 */
+function toggleWikiGroup(key) {
+  if (WIKI.collapsed.has(key)) WIKI.collapsed.delete(key);
+  else WIKI.collapsed.add(key);
+  localStorage.setItem('gb.wiki.collapsed', JSON.stringify([...WIKI.collapsed]));
+  renderWikiTree();
+}
+
+function renderWikiTree() {
+  const box = $('#wikitreebox');
+  box.innerHTML = '';
+  const d = WIKI.tree;
+  if (!d || !d.total) {
+    box.innerHTML = '<div class="empty">还没有条目，点上面「生成 wiki」</div>';
+    return;
+  }
+  const q = ($('#wikifilter').value || '').trim().toLowerCase();
+  const hit = (p) => !q || p.ref.toLowerCase().includes(q) || (p.summary || '').toLowerCase().includes(q);
+  // 搜索态下忽略折叠状态，否则命中的条目会被折叠藏起来
+  const isClosed = (key) => !q && WIKI.collapsed.has(key);
+  for (const g of d.groups) {
+    const pages = g.pages.filter(hit);
+    if (!pages.length) continue;
+    const key = g.type + '/' + g.label;
+    const closed = isClosed(key);
+    const h = el('div','grp' + (closed ? ' closed' : ''));
+    const caret = el('span','arw'); caret.textContent = '▾';
+    const label = el('span'); label.textContent = `${g.type} · ${g.label}（${pages.length}）`;
+    h.append(caret, label);
+    h.title = closed ? '点击展开' : '点击折叠';
+    h.onclick = () => toggleWikiGroup(key);
+    box.appendChild(h);
+    if (closed) continue;
+    for (const p of pages) {
+      const it = el('div','it' + (WIKI.ref === p.ref ? ' on' : ''));
+      const t = el('span','t'); t.textContent = p.ref.split('/').slice(1).join('/');
+      // 状态点：校验没过最严重（红），其次原文变了要重建（黄）
+      const dot = el('span','dot' + (!p.verified ? ' bad' : p.stale ? ' stale' : ''));
+      dot.title = !p.verified
+        ? `有 ${p.unverified.length} 处内容在原文里找不到：${p.unverified.join('、')}`
+        : p.stale
+          ? '依据的原文已经改过，建议重新生成这一页'
+          : '溯源校验通过';
+      it.append(t, dot);
+      it.title = p.summary || p.title;
+      it.onclick = () => openWikiPage(p.ref);
+      box.appendChild(it);
+    }
+  }
+  // index / AGENTS / log 三个附属文件放最下面，也做成可折叠的一组
+  if (d.files.length) {
+    const closed = isClosed('files');
+    const h = el('div','grp' + (closed ? ' closed' : ''));
+    const caret = el('span','arw'); caret.textContent = '▾';
+    const label = el('span'); label.textContent = `附属文件（${d.files.length}）`;
+    h.append(caret, label);
+    h.title = closed ? '点击展开' : '点击折叠';
+    h.onclick = () => toggleWikiGroup('files');
+    box.appendChild(h);
+    if (!closed) {
+      const wrap = el('div','files');
+      for (const name of d.files) {
+        const it = el('div','it');
+        const t = el('span','t'); t.textContent = name;
+        it.appendChild(t);
+        it.onclick = () => openWikiFile(name);
+        wrap.appendChild(it);
+      }
+      box.appendChild(wrap);
+    }
+  }
+}
+$('#wikifilter').oninput = () => renderWikiTree();
+
+async function loadWikiGraph() {
+  try {
+    const r = await fetch('/wiki/graph');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+    GRAPH.data = d;
+    renderWikiGraph();
+  } catch (e) {
+    $('#graphstatus').textContent = '读取图谱失败: ' + e.message;
+  }
+}
+
+function buildWikiGraph() {
+  const data = GRAPH.data;
+  const nodes = (data?.nodes || []).map((node) => ({
+    ...node,
+    degreeIn: 0,
+    degreeOut: 0,
+    x: 0,
+    y: 0,
+  }));
+  const pageNodes = nodes.filter((node) => node.kind === 'page');
+  const nodeByRef = new Map(nodes.map((node) => [node.id, node]));
+  const edges = (data?.edges || []).filter((edge) => edge.source && edge.target).map((edge) => ({ ...edge }));
+  for (const edge of edges) {
+    const source = nodeByRef.get(edge.source);
+    const target = nodeByRef.get(edge.target);
+    if (source) source.degreeOut++;
+    if (target && (edge.type === 'wiki_link' || edge.type === 'same_source')) target.degreeIn++;
+  }
+  for (const node of pageNodes) node.isolated = Boolean(node.isolated) || (node.degreeIn === 0 && node.degreeOut === 0);
+  const groupMap = new Map();
+  for (const node of pageNodes) {
+    const key = node.type || 'page';
+    if (!groupMap.has(key)) groupMap.set(key, { type: key, label: key, pages: [] });
+    groupMap.get(key).pages.push(node);
+  }
+  return { groupDefs: [...groupMap.values()], nodes, pageNodes, edges, nodeByRef };
+}
+
+function toggleGraphFolder(key) {
+  if (GRAPH.collapsed.has(key)) GRAPH.collapsed.delete(key);
+  else GRAPH.collapsed.add(key);
+  localStorage.setItem('gb.graph.collapsed', JSON.stringify([...GRAPH.collapsed]));
+  renderWikiGraph();
+}
+
+function renderWikiGraph() {
+  const boxList = $('#graphlist');
+  const boxSvg = $('#graphsvg');
+  const boxDetail = $('#graphdetail');
+  if (!boxList || !boxSvg || !boxDetail) return;
+
+  const graphData = GRAPH.data;
+  if (!graphData || !graphData.metadata?.pageCount) {
+    $('#graphcount').textContent = '0';
+    $('#graphcount2').textContent = '0';
+    $('#graphstatus').textContent = '还没有条目，先生成 wiki';
+    boxList.innerHTML = '';
+    boxList.innerHTML = '<div class="empty">还没有条目</div>';
+    boxSvg.innerHTML = '';
+    boxDetail.innerHTML = '<div class="empty">从图里选一个条目</div>';
+    return;
+  }
+
+  const graph = buildWikiGraph();
+  const query = ($('#graphfilter').value || '').trim().toLowerCase();
+  GRAPH.query = query;
+  GRAPH.showStale = $('#graphstale').checked;
+  GRAPH.showIsolated = $('#graphisolated').checked;
+  $('#graphcount').textContent = graphData.metadata.pageCount;
+
+  const visibleNodes = graph.pageNodes.filter((node) => {
+    const haystack = [node.ref, node.title, node.summary, node.type, ...(node.backlinks || []), ...(node.related || [])]
+      .join(' ')
+      .toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (!GRAPH.showStale && node.stale) return false;
+    if (!GRAPH.showIsolated && node.isolated) return false;
+    return true;
+  });
+  const visibleSet = new Set(visibleNodes.map((node) => node.ref));
+  const visibleSourceIds = new Set(
+    graph.edges
+      .filter((edge) => edge.type === 'supports' && visibleSet.has(edge.source))
+      .map((edge) => edge.target),
+  );
+  const activeRef = GRAPH.ref && graph.nodeByRef.get(GRAPH.ref)?.kind === 'page' ? GRAPH.ref : (visibleNodes[0]?.ref || null);
+  if (activeRef !== GRAPH.ref) GRAPH.ref = activeRef;
+
+  const visibleEdges = graph.edges.filter((edge) => {
+    if (edge.type === 'dangling') return visibleSet.has(edge.source);
+    if (edge.type === 'supports') return visibleSet.has(edge.source) && visibleSourceIds.has(edge.target);
+    return visibleSet.has(edge.source) && visibleSet.has(edge.target);
+  });
+  const activeIds = activeRef ? new Set([activeRef]) : null;
+  if (activeRef) {
+    for (const edge of graph.edges) {
+      if (edge.source === activeRef && graph.nodeByRef.has(edge.target)) activeIds.add(edge.target);
+      if (edge.target === activeRef && graph.nodeByRef.has(edge.source)) activeIds.add(edge.source);
+    }
+  }
+
+  const width = 1800;
+  const leftPad = 150;
+  const rightPad = 210;
+  const topPad = 100;
+  const rowGap = 92;
+  const maxPageRows = Math.max(1, ...graph.groupDefs.map((g) => g.pages.length));
+  const maxSourceRows = Math.max(1, graph.nodes.filter((node) => node.kind === 'source_chunk' && visibleSourceIds.has(node.id)).length);
+  const maxRows = Math.max(maxPageRows, maxSourceRows);
+  const height = Math.max(760, topPad + maxRows * rowGap + 170);
+  const columns = Math.max(1, graph.groupDefs.length);
+  const usableWidth = width - leftPad - rightPad;
+  const colStep = columns > 1 ? usableWidth / (columns - 1) : 0;
+  const nodePos = new Map();
+
+  graph.groupDefs.forEach((group, groupIndex) => {
+    const x = columns === 1 ? width / 2 : leftPad + groupIndex * colStep;
+    group.pages.forEach((page, rowIndex) => {
+      const node = graph.nodeByRef.get(page.ref);
+      if (!node) return;
+      node.x = x;
+      node.y = topPad + rowIndex * rowGap;
+      nodePos.set(node.ref, { x: node.x, y: node.y });
+    });
+  });
+  const sourceNodes = graph.nodes
+    .filter((node) => node.kind === 'source_chunk' && visibleSourceIds.has(node.id))
+    .sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
+  const sourceX = width - rightPad;
+  sourceNodes.forEach((node, index) => {
+    node.x = sourceX;
+    node.y = topPad + index * rowGap;
+    nodePos.set(node.id, { x: node.x, y: node.y });
+  });
+  boxSvg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+  const visibleEdgesMarkup = visibleEdges.map((edge) => {
+    const source = graph.nodeByRef.get(edge.source);
+    const target = graph.nodeByRef.get(edge.target);
+    if (!source || !target) return '';
+    const isActive = activeIds && activeIds.has(edge.source) && activeIds.has(edge.target);
+    const dim = activeIds && !isActive ? ' dim' : '';
+    const type = edge.type === 'supports' ? ' supports' : edge.type === 'same_source' ? ' same-source' : edge.type === 'dangling' ? ' dangling' : '';
+    return `<line class="graphedge${type}${isActive ? ' active' : ''}${dim}" x1="${source.x}" y1="${source.y}" x2="${target.x}" y2="${target.y}" />`;
+  }).join('');
+  const visibleNodesMarkup = graph.nodes.map((node) => {
+    const isSource = node.kind === 'source_chunk';
+    const visible = isSource ? visibleSourceIds.has(node.id) : visibleSet.has(node.ref);
+    const active = !isSource && activeRef === node.ref;
+    const dim = activeIds && !activeIds.has(node.ref || node.id) ? ' dim' : '';
+    const fill = isSource ? '#9a9a9a' : !node.verified ? 'var(--bad)' : node.stale ? 'var(--warn)' : node.isolated ? '#9a9a9a' : '#111111';
+    const r = active ? 18 : isSource ? 10 : 13;
+    const label = isSource ? node.title : ((node.ref || node.id).split('/').slice(1).join('/') || node.ref || node.id);
+    return `<g class="graphnode${active ? ' active' : ''}${isSource ? ' source-node' : ''}${visible ? '' : ' dim'}${dim}" data-ref="${graphEscape(node.ref || node.id)}" transform="translate(${node.x}, ${node.y})" style="opacity:${visible ? 1 : 0}; pointer-events:${visible && !isSource ? 'auto' : 'none'}">`
+      + `<title>${graphEscape(node.title)}\n${graphEscape(node.ref || node.id)}</title>`
+      + `<circle r="${r}" fill="${fill}"></circle>`
+      + `<text text-anchor="middle" y="${r + 15}">${graphEscape(label.length > 24 ? label.slice(0, 23) + '…' : label)}</text>`
+      + `</g>`;
+  }).join('');
+  boxSvg.innerHTML = `${visibleEdgesMarkup}${visibleNodesMarkup}`;
+  boxSvg.querySelectorAll('.graphnode').forEach((group) => {
+    group.addEventListener('click', () => selectGraphNode(group.dataset.ref));
+  });
+
+  boxList.innerHTML = '';
+  if (!visibleNodes.length) {
+    boxList.innerHTML = '<div class="empty">没有匹配的条目</div>';
+  } else {
+    const tree = el('div', 'graphtree');
+    for (const group of graph.groupDefs) {
+      const pages = group.pages.map((p) => graph.nodeByRef.get(p.ref)).filter((node) => node && visibleSet.has(node.ref));
+      if (!pages.length) continue;
+      const key = `type/${group.type}`;
+      const closed = !query && GRAPH.collapsed.has(key);
+      const folder = el('div', 'folder');
+      const arrow = el('span', 'arw'); arrow.textContent = closed ? '›' : '⌄';
+      const icon = el('span', 'foldericon'); icon.textContent = closed ? '▱' : '▰';
+      const label = el('span'); label.textContent = group.label || group.type;
+      const count = el('span', 'count'); count.textContent = String(pages.length);
+      folder.append(arrow, icon, label, count);
+      folder.onclick = () => toggleGraphFolder(key);
+      tree.appendChild(folder);
+      const children = el('div', 'children' + (closed ? ' closed' : ''));
+      for (const node of pages) {
+        const item = el('div', 'leaf' + (GRAPH.ref === node.ref ? ' on' : '') + (activeIds && !activeIds.has(node.ref) ? ' dim' : ''));
+        const title = el('span', 't'); title.textContent = node.ref.split('/').slice(1).join('/') || node.ref;
+        const score = el('span', 'n'); score.textContent = node.isolated ? '孤立' : `${node.degreeIn + node.degreeOut}`;
+        const dot = el('span', 'dot' + (!node.verified ? ' bad' : node.stale ? ' stale' : node.isolated ? ' isolated' : ''));
+        dot.title = !node.verified
+          ? `有 ${node.unverified.length} 处内容在原文里找不到`
+          : node.stale
+            ? '依据的原文已经改过，建议重新生成这一页'
+            : node.isolated
+              ? '没有和其他条目形成链接'
+              : '溯源校验通过';
+        item.append(title, score, dot);
+        item.onclick = (event) => { event.stopPropagation(); selectGraphNode(node.ref); };
+        children.appendChild(item);
+      }
+      tree.appendChild(children);
+    }
+    boxList.appendChild(tree);
+  }
+  $('#graphcount2').textContent = String(visibleNodes.length);
+  const issueCount = graphData.issues?.length || 0;
+  $('#graphstatus').textContent = `${visibleNodes.length}/${graph.pageNodes.length} 条条目 · ${visibleEdges.length} 条关系 · ${issueCount} 个质量问题`;
+  renderGraphDetail(graph.nodeByRef.get(GRAPH.ref) || null, graph, activeIds);
+}
+
+function renderGraphDetail(node, graph, activeIds) {
+  const box = $('#graphdetail');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!node) {
+    box.innerHTML = '<div class="empty">从图里选一个条目</div>';
+    return;
+  }
+
+  const crumb = el('div', 'crumb');
+  crumb.textContent = 'graph / ' + node.ref.replace('/', ' / ');
+  box.appendChild(crumb);
+
+  const ops = el('div', 'ops');
+  const open = el('button'); open.textContent = '打开 wiki';
+  open.onclick = () => { showKbTab('wiki'); openWikiPage(node.ref); };
+  const focus = el('button'); focus.textContent = '定位到图中';
+  focus.onclick = () => selectGraphNode(node.ref);
+  ops.append(open, focus);
+  box.appendChild(ops);
+
+  const card = el('div', 'wikicard');
+  const badge = el('span', 'badge'); badge.textContent = node.type;
+  const sum = el('div', 'sum'); sum.textContent = node.summary || '(没有摘要)';
+  card.append(badge, sum);
+
+  const kv = (k, build) => {
+    const row = el('div', 'kv');
+    const kk = el('span', 'k'); kk.textContent = k;
+    const vv = el('span', 'v');
+    build(vv);
+    row.append(kk, vv);
+    card.appendChild(row);
+  };
+
+  kv('状态', (v) => {
+    const bits = [];
+    bits.push(node.verified ? '✓ 溯源通过' : `✗ ${node.unverified.length} 处未通过校验`);
+    if (node.stale) bits.push('⚠ 依据原文已过期');
+    if (node.isolated) bits.push('• 孤立条目');
+    v.textContent = bits.join(' · ');
+  });
+  kv('来源', (v) => {
+    const sources = node.sources || [];
+    if (!sources.length) { v.textContent = '（无）'; return; }
+    v.textContent = sources.join('、');
+  });
+  kv('被引用', (v) => {
+    if (!node.backlinks?.length) { v.textContent = '（无）'; return; }
+    node.backlinks.forEach((ref, i) => {
+      if (i) v.appendChild(document.createTextNode('、'));
+      const a = el('span', 'wlink'); a.textContent = ref;
+      a.onclick = () => selectGraphNode(ref);
+      v.appendChild(a);
+    });
+  });
+  kv('引用了', (v) => {
+    if (!node.related?.length) { v.textContent = '（无）'; return; }
+    node.related.forEach((ref, i) => {
+      if (i) v.appendChild(document.createTextNode('、'));
+      const a = el('span', 'wlink'); a.textContent = ref;
+      a.onclick = () => selectGraphNode(ref);
+      v.appendChild(a);
+    });
+  });
+  if (node.unverified.length) {
+    kv('未通过校验', (v) => { v.textContent = node.unverified.join('、'); });
+  }
+
+  box.appendChild(card);
+}
+
+function graphEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function selectGraphNode(ref) {
+  if (!ref) return;
+  GRAPH.ref = ref;
+  if ($('#kbgraph').hidden === false) renderWikiGraph();
+}
+
+$('#graphfilter').oninput = () => renderWikiGraph();
+$('#graphstale').onchange = () => renderWikiGraph();
+$('#graphisolated').onchange = () => renderWikiGraph();
+
+async function openWikiFile(name) {
+  WIKI.ref = null;
+  renderWikiTree();
+  const box = $('#wikipagebox');
+  box.innerHTML = '';
+  try {
+    const r = await fetch('/wiki/file?name=' + encodeURIComponent(name));
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+    const crumb = el('div','crumb'); crumb.textContent = 'wiki / ' + name + '.md';
+    box.append(crumb, renderMd(d.text));
+  } catch (e) {
+    box.textContent = '读取失败: ' + e.message;
+  }
+}
+
+async function openWikiPage(ref) {
+  WIKI.ref = ref;
+  GRAPH.ref = ref;
+  WIKI.editing = false;
+  // 从别处（比如事件流里的 ref）跳过来时，如果它所在分组是折叠的，先展开——
+  // 不然选中高亮藏在折叠组里，看着像没反应
+  const g = (WIKI.tree?.groups || []).find((x) => x.pages.some((p) => p.ref === ref));
+  if (g) WIKI.collapsed.delete(g.type + '/' + g.label);
+  renderWikiTree();
+  const box = $('#wikipagebox');
+  box.innerHTML = '';
+  let d;
+  try {
+    const r = await fetch('/wiki/page?ref=' + encodeURIComponent(ref));
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+  } catch (e) {
+    box.textContent = '读取失败: ' + e.message;
+    return;
+  }
+
+  const crumb = el('div','crumb'); crumb.textContent = 'wiki / ' + d.ref.replace('/', ' / ');
+  box.appendChild(crumb);
+
+  const ops = el('div','ops');
+  const edit = el('button'); edit.textContent = '编辑';
+  edit.title = '模型编错了可以手改；保存时会重新做一次溯源校验';
+  edit.onclick = () => startWikiEdit(d);
+  const rebuild = el('button'); rebuild.textContent = '重新生成';
+  rebuild.title = '让模型重新编译这篇资料的条目（依据的原文改过之后用）';
+  rebuild.onclick = () => buildWiki(d.sourceChunks[0]?.docId);
+  const del = el('button','danger'); del.textContent = '删除';
+  del.title = '只删条目，原文不动，随时能重新生成';
+  del.onclick = async () => {
+    if (!confirm(`删除条目 ${d.ref}？\n\n原文不会动，之后可以重新生成。`)) return;
+    const r = await fetch('/wiki/delete', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ref: d.ref }) });
+    const dd = await r.json();
+    if (!r.ok) { $('#wikistatus').textContent = '删除失败: ' + (dd.error || ''); return; }
+    $('#wikistatus').textContent = '已删除 ' + d.ref;
+    WIKI.ref = null;
+    $('#wikipagebox').innerHTML = '<div class="empty">从左边选一条看看</div>';
+    loadWikiTree();
+  };
+  ops.append(edit, rebuild, del);
+  box.appendChild(ops);
+
+  // 条目卡：类型、摘要、出处、校验结果、被谁引用
+  const card = el('div','wikicard');
+  const badge = el('span','badge'); badge.textContent = d.type;
+  const sum = el('div','sum'); sum.textContent = d.summary || '(没有摘要)';
+  card.append(badge, sum);
+  const kv = (k, build) => {
+    const row = el('div','kv');
+    const kk = el('span','k'); kk.textContent = k;
+    const vv = el('span','v');
+    build(vv);
+    row.append(kk, vv); card.appendChild(row);
+  };
+  kv('依据块', (v) => {
+    if (!d.sourceChunks.length) { v.textContent = '（无）'; return; }
+    for (const s of d.sourceChunks) {
+      const a = el('a');
+      a.textContent = s.headingPath ? `${s.headingPath} #${s.index}` : s.ref;
+      a.title = '看原文 ' + s.ref;
+      a.onclick = () => jumpToSource(s.ref);
+      v.appendChild(a);
+    }
+  });
+  kv('校验', (v) => {
+    if (d.verified) { v.className = 'v ok'; v.textContent = '✓ 数字与标识符全部能在原文里找到'; }
+    else {
+      v.className = 'v bad';
+      v.textContent = `✗ 这些内容在原文里找不到：${(d.unverified || []).join('、')}（不参与回答）`;
+    }
+  });
+  if (d.aliases.length) kv('别名', (v) => { v.textContent = d.aliases.join('、'); });
+  if (d.backlinks.length) kv('被引用', (v) => {
+    for (const ref of d.backlinks) {
+      const a = el('a'); a.textContent = ref;
+      a.onclick = () => openWikiPage(ref);
+      v.appendChild(a);
+    }
+  });
+  box.appendChild(card);
+  box.appendChild(renderMd(d.body));
+}
+
+/** 编辑态：直接改正文（frontmatter 由系统维护，不让手改，免得 ref/来源被写坏） */
+function startWikiEdit(d) {
+  const box = $('#wikipagebox');
+  box.innerHTML = '';
+  const crumb = el('div','crumb'); crumb.textContent = 'wiki / ' + d.ref.replace('/', ' / ') + ' · 编辑中';
+  box.appendChild(crumb);
+  const sumInput = el('input');
+  sumInput.type = 'text';
+  sumInput.value = d.summary || '';
+  sumInput.placeholder = '一句话摘要（会进注入给模型的目录，别写具体数字）';
+  const ta = el('textarea','wikiedit');
+  ta.value = d.body;
+  const ops = el('div','ops');
+  const save = el('button'); save.textContent = '保存';
+  save.onclick = async () => {
+    const r = await fetch('/wiki/save', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ref: d.ref, body: ta.value, summary: sumInput.value }) });
+    const dd = await r.json();
+    if (!r.ok) { $('#wikistatus').textContent = '保存失败: ' + (dd.error || ''); return; }
+    $('#wikistatus').textContent = dd.verified
+      ? `已保存 ${d.ref}（溯源校验通过）`
+      : `已保存 ${d.ref}，但这些内容在原文里找不到：${dd.missing.join('、')}`;
+    loadWikiTree();
+    openWikiPage(d.ref);
+  };
+  const cancel = el('button'); cancel.textContent = '取消';
+  cancel.onclick = () => openWikiPage(d.ref);
+  ops.append(save, cancel);
+  box.append(ops, sumInput, ta);
+}
+
+async function buildWiki(doc, staleOnly) {
+  const btn = staleOnly ? $('#wikistale') : $('#wikibuild'), status = $('#wikistatus');
+  btn.disabled = true;
+  status.textContent = staleOnly
+    ? '正在重建依据原文已改动的条目（要调模型，稍等）…'
+    : (doc ? `正在重新编译《${doc}》的条目（要调模型，稍等）…` : '正在编译全部资料（要调模型，可能要一会儿）…');
+  try {
+    const r = await fetch('/wiki/build', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(staleOnly ? { staleOnly: true } : (doc ? { doc } : {})) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    status.textContent =
+      `${staleOnly ? '重建' : '生成'} ${d.pages.length} 条条目` +
+      (d.unverified ? `，其中 ${d.unverified} 条未通过溯源校验（左边红点）` : '，全部通过溯源校验') +
+      (d.failed.length ? `；失败 ${d.failed.length}：${d.failed.join('；')}` : '');
+    loadWikiTree();
+  } catch (e) {
+    status.textContent = '生成失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#wikibuild').onclick = () => buildWiki();
+$('#wikistale').onclick = () => buildWiki(undefined, true);
+
+/* 补摘要：条目缺摘要就只是目录里的一个 ref，缺别名就换个说法召不回来。
+ * 单独一个按钮而不是并进「生成 wiki」——它只改两个字段，比重编译便宜得多。 */
+async function summarizeWiki() {
+  const btn = $('#wikisum'), status = $('#wikistatus');
+  btn.disabled = true;
+  status.textContent = '正在给缺摘要/别名的条目补齐（要调模型）…';
+  try {
+    const r = await fetch('/wiki/summarize', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    status.textContent = d.done.length
+      ? `补齐 ${d.done.length} 条（${d.done.map(x => x.ref + ' 别名' + x.aliases).join('、')}）` +
+        (d.failed.length ? `；失败 ${d.failed.length}：${d.failed.join('；')}` : '')
+      : (d.failed.length ? `没有补成：${d.failed.join('；')}` : '所有条目的摘要和别名都齐了');
+    loadWikiTree();
+  } catch (e) {
+    status.textContent = '补摘要失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#wikisum').onclick = () => summarizeWiki();
+
+/* ── 质检：五维机械分 + 雷达 + 30 天趋势 ──────────────────────
+ * 图全是手写 SVG（createElementNS）：零依赖装不了图表库，
+ * 而且这两张图都只是「五个点连成环」和「一条折线」，用不上图表库。
+ */
+const AUDIT = { last: null, history: [], report: null };
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const svg = (tag, attrs) => {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+};
+/** 分数 → 颜色档：≥85 绿、≥60 黄、其余红。跟条目树的三色点一个语义 */
+const gradeOf = (s) => (s >= 85 ? 'good' : s >= 60 ? 'mid' : 'low');
+const GRADE_COLOR = { good: '#1a7f37', mid: '#9a6700', low: '#cf222e' };
+/** 只读历史时趋势文件里只有 key，标签在这儿补 */
+const DIM_LABEL = { provenance:'溯源可信', freshness:'时效新鲜', coverage:'原文覆盖', retrievable:'可检索', distinct:'精炼去重', links:'链接完整' };
+
+/** 五维雷达：一个正五边形网格 + 一条闭合折线 */
+function renderRadar(box, dims) {
+  box.innerHTML = '';
+  const W = 260, H = 190, cx = W / 2, cy = H / 2 + 4, R = 62;
+  const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', height: '190' });
+  const at = (i, r) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / dims.length;
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  };
+  for (const ring of [0.25, 0.5, 0.75, 1]) {
+    const pts = dims.map((_, i) => at(i, R * ring).join(',')).join(' ');
+    s.appendChild(svg('polygon', { points: pts, fill: 'none', stroke: '#e5e5e5' }));
+  }
+  dims.forEach((_, i) => {
+    const [x, y] = at(i, R);
+    s.appendChild(svg('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: '#ececec' }));
+  });
+  const pts = dims.map((d, i) => at(i, (R * Math.max(d.score, 2)) / 100).join(',')).join(' ');
+  s.appendChild(svg('polygon', { points: pts, fill: 'rgba(17,17,17,.08)', stroke: '#111111', 'stroke-width': '1.5' }));
+  dims.forEach((d, i) => {
+    const [x, y] = at(i, R + 16);
+    const t = svg('text', {
+      x, y, fill: 'var(--dim)', 'font-size': '10', 'text-anchor': x > cx + 4 ? 'start' : x < cx - 4 ? 'end' : 'middle',
+    });
+    t.textContent = d.label;
+    s.appendChild(t);
+  });
+  box.appendChild(s);
+}
+
+/** 30 天趋势：一条折线。只有一次质检时画一个点并说明「还看不出趋势」 */
+function renderTrend(box, history) {
+  box.innerHTML = '';
+  if (!history.length) { box.appendChild(el('div','empty')).textContent = '还没有历史'; return; }
+  const W = 300, H = 150, pad = 26;
+  const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', height: '150' });
+  const xs = history.length > 1 ? (W - pad * 2) / (history.length - 1) : 0;
+  const y = (v) => H - pad - (Math.max(0, Math.min(100, v)) / 100) * (H - pad * 2);
+  for (const v of [0, 50, 100]) {
+    s.appendChild(svg('line', { x1: pad, y1: y(v), x2: W - pad, y2: y(v), stroke: '#ececec' }));
+    const t = svg('text', { x: 4, y: y(v) + 3, fill: 'var(--dim)', 'font-size': '9' });
+    t.textContent = String(v);
+    s.appendChild(t);
+  }
+  const pts = history.map((p, i) => `${pad + i * xs},${y(p.score)}`);
+  if (history.length > 1) {
+    s.appendChild(svg('polyline', { points: pts.join(' '), fill: 'none', stroke: '#111111', 'stroke-width': '1.6' }));
+  }
+  history.forEach((p, i) => {
+    const [x, yy] = pts[i].split(',');
+    const c = svg('circle', { cx: x, cy: yy, r: '2.6', fill: '#111111' });
+    c.appendChild(svg('title', {})).textContent = `${new Date(p.ts).toLocaleString()} · ${p.score}`;
+    s.appendChild(c);
+  });
+  box.appendChild(s);
+  if (history.length < 2) {
+    const m = el('div','meta'); m.textContent = '只有一次记录，还看不出趋势。改完 AGENTS.md 或重新生成后再跑一次就有对比了。';
+    box.appendChild(m);
+  }
+}
+
+/** 点问题清单上的一条 → 跳到那个条目（清单每条都以 ref 开头） */
+function jumpFromIssue(text) {
+  const ref = (text.split(' — ')[0] || '').trim();
+  if (!/^(source|concept|entity|analysis)\//.test(ref)) return;
+  showKbTab('wiki');
+  openWikiPage(ref);
+}
+
+function renderAudit() {
+  const r = AUDIT.report, last = AUDIT.last;
+  const score = r ? r.score : last ? last.score : null;
+  $('#auditempty').hidden = score !== null;
+  $('#auditbody').hidden = score === null;
+  $('#auditscore').textContent = score === null ? '–' : score;
+  if (score === null) return;
+
+  $('#auditbig').textContent = score;
+  $('#auditbig').style.color = GRADE_COLOR[gradeOf(score)];
+  const when = r ? r.ts : last.ts;
+  $('#auditmeta').textContent = `${r ? r.pages : last.pages} 条条目 · ${new Date(when).toLocaleString()}`;
+
+  // 只读上次结果时没有维度明细（趋势文件只存数字），用趋势点里的分数画雷达
+  const dims = r ? r.dims : Object.entries(last.dims || {}).map(([k, v]) => ({ key: k, label: DIM_LABEL[k] || k, score: v, weight: 0, detail: '', issues: [] }));
+  renderRadar($('#auditradar'), dims);
+  renderTrend($('#audittrend'), AUDIT.history);
+
+  const box = $('#auditdims');
+  box.innerHTML = '';
+  for (const d of dims) {
+    const c = el('div','auditdim ' + gradeOf(d.score));
+    const hd = el('div','hd');
+    const nm = el('span','nm'); nm.textContent = d.label; hd.appendChild(nm);
+    if (d.weight) { const w = el('span','w'); w.textContent = `权重 ${d.weight}`; hd.appendChild(w); }
+    const sc = el('span','sc'); sc.textContent = d.score; sc.style.color = GRADE_COLOR[gradeOf(d.score)];
+    hd.appendChild(sc);
+    c.appendChild(hd);
+    const bar = el('div','bar'); const i = el('i'); i.style.width = Math.max(d.score, 1) + '%'; bar.appendChild(i);
+    c.appendChild(bar);
+    if (d.detail) { const dt = el('div','dt'); dt.textContent = d.detail; c.appendChild(dt); }
+    if (d.issues.length) {
+      const ul = el('ul');
+      for (const issue of d.issues) {
+        const li = el('li'); li.textContent = issue;
+        li.onclick = () => jumpFromIssue(issue);
+        ul.appendChild(li);
+      }
+      c.appendChild(ul);
+    }
+    box.appendChild(c);
+  }
+
+  const sbox = $('#auditsamplebox');
+  sbox.innerHTML = '';
+  if (r && r.sample) {
+    const c = el('div','auditsample');
+    const t = el('div','ct');
+    t.textContent = `模型抽检 ${r.sample.n} 条 · 均分 ${r.sample.avg}/2（会抖，不进综合分与趋势线）`;
+    c.appendChild(t);
+    for (const it of r.sample.items) {
+      const row = el('div','row');
+      const s2 = el('span','s'); s2.textContent = it.score + '/2'; row.appendChild(s2);
+      const ref = el('span','r'); ref.textContent = it.ref;
+      ref.onclick = () => { showKbTab('wiki'); openWikiPage(it.ref); };
+      row.appendChild(ref);
+      const n2 = el('span','dt'); n2.textContent = it.note; row.appendChild(n2);
+      c.appendChild(row);
+    }
+    for (const f of r.sample.failed) {
+      const row = el('div','row'); row.textContent = '✗ ' + f; c.appendChild(row);
+    }
+    sbox.appendChild(c);
+  }
+}
+
+async function loadAudit() {
+  try {
+    const d = await (await fetch('/wiki/audit')).json();
+    AUDIT.last = d.last; AUDIT.history = d.history || [];
+    renderAudit();
+  } catch (e) {
+    $('#auditstatus').textContent = '读取质检历史失败: ' + e.message;
+  }
+}
+
+async function runAudit(sample) {
+  for (const id of ['#auditrun','#auditrun2']) $(id).disabled = true;
+  $('#auditstatus').textContent = sample ? '正在质检（机械分秒级，模型抽检要等一会儿）…' : '正在质检…';
+  try {
+    const r = await fetch('/wiki/audit', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sample: sample ? 3 : 0 }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    AUDIT.report = d.report; AUDIT.history = d.history || []; AUDIT.last = AUDIT.history.at(-1) || null;
+    const prev = AUDIT.history.length > 1 ? AUDIT.history[AUDIT.history.length - 2] : null;
+    $('#auditstatus').textContent = prev
+      ? `综合分 ${d.report.score}（上次 ${prev.score}）`
+      : `综合分 ${d.report.score}`;
+    renderAudit();
+  } catch (e) {
+    $('#auditstatus').textContent = '质检失败: ' + e.message;
+  } finally {
+    for (const id of ['#auditrun','#auditrun2']) $(id).disabled = false;
+  }
+}
+$('#auditrun').onclick = () => runAudit($('#auditsample').checked);
+$('#auditrun2').onclick = () => runAudit($('#auditsample2').checked);
+
+/* ── 会话轨迹 ── */
+const SESS = { id: null, max: 1, current: null, timer: 0 };
+/** 正在只读预览的历史会话 id（null = 就在当前会话里） */
+let PREVIEW = null;
+
+/** 列表里显示的名字：手动改的名字优先，其次第一句提问 */
+const sessName = (s) => s.title || s.firstAsk || (s.pending ? '当前会话 · 还没开始' : '(还没提问)');
+
+/**
+ * 当前会话可能还没落盘（懒创建：一句话没说就不建文件），这时它不在 /sessions 的列表里。
+ * 补一条占位项，否则「当前在哪个会话」在界面上会凭空消失。
+ */
+function withPendingCurrent(d) {
+  const list = d.sessions.slice();
+  if (d.currentPending && d.current && !list.some((s) => s.sessionId === d.current)) {
+    list.unshift({ sessionId: d.current, events: 0, bytes: 0, pending: true });
+  }
+  return list;
+}
+
+/** 改名：往该会话日志追加一条 session.renamed（历史一行不改） */
+async function renameSession(s) {
+  const t = prompt('给这个会话起个名字：', sessName(s));
+  if (t === null) return;
+  const r = await fetch('/sessions/rename', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: s.sessionId, title: t }),
+  });
+  const d = await r.json();
+  if (!r.ok) { addTrace('bad', '改名失败', d.error || ''); return; }
+  loadRecents();
+  if (!$('#sess').hidden) loadSessions();
+}
+
+/** 删除：真的把日志文件删掉，不可恢复，所以先确认一次 */
+async function deleteSession(s) {
+  if (!confirm(`删除会话「${sessName(s)}」？\n\n它的日志文件会被真的删掉，无法恢复。`)) return;
+  const r = await fetch('/sessions/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: s.sessionId }),
+  });
+  const d = await r.json();
+  if (!r.ok) { addTrace('bad', '删除失败', d.error || ''); return; }
+  if (SESS.id === s.sessionId) { $('#sessdetail').hidden = true; SESS.id = null; }
+  loadRecents();
+  if (!$('#sess').hidden) loadSessions();
+}
+
+/** 每条会话后面挂「改名 / 删除」两个小按钮（当前会话不给删） */
+function sessActions(s, isCurrent) {
+  const box = el('span','ops');
+  const rn = el('button'); rn.textContent = '改名'; rn.title = '重命名这个会话';
+  rn.onclick = (e) => { e.stopPropagation(); renameSession(s); };
+  box.appendChild(rn);
+  const del = el('button','danger'); del.textContent = '删除';
+  del.title = isCurrent ? '当前会话不能删，先新建一个' : '删除这个会话的日志文件（不可恢复）';
+  del.disabled = isCurrent;
+  del.onclick = (e) => { e.stopPropagation(); deleteSession(s); };
+  box.appendChild(del);
+  return box;
+}
+
+/**
+ * 侧边栏「最近对话」：/sessions 的精简渲染。
+ * 点一条就在会话轨迹页打开它（那里能拖时间轴、能从任意一步分叉继续）。
+ */
+function renderRecents(d) {
+  const ul = $('#recents'); ul.innerHTML = '';
+  SESS.current = d.current;
+  SESS.pending = Boolean(d.currentPending);
+  const all = withPendingCurrent(d);
+  // 没问过任何问题的空会话不占位置（当前会话例外，否则新建后侧边栏看着像没反应）
+  const items = all.filter((s) => s.firstAsk || s.title || s.sessionId === d.current).slice(0, 8);
+  if (!items.length) { ul.innerHTML = '<li class="empty">暂无</li>'; return; }
+  for (const s of items) {
+    const cur = s.sessionId === d.current;
+    const li = el('li', cur ? 'on' : '');
+    li.title = s.sessionId + (s.forkedFrom ? `（分叉自 ${s.forkedFrom.sessionId}@${s.forkedFrom.seq}）` : '');
+    const t = el('span','t');
+    t.textContent = (cur ? '● ' : '') + sessName(s);
+    const n = el('span','n');
+    const when = s.startedAt ? new Date(s.startedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+    n.textContent = s.pending
+      ? '还没写入日志（说第一句话时才建文件）'
+      : when + ' · ' + s.events + ' 事件' + (s.forkedFrom ? ' · 分叉' : '');
+    li.append(t, n);
+    if (!s.pending) li.appendChild(sessActions(s, cur));
+    li.onclick = () => { if (!s.pending) previewSession(s.sessionId, sessName(s)); };
+    ul.appendChild(li);
+  }
+}
+
+async function loadRecents() {
+  try {
+    renderRecents(await (await fetch('/sessions')).json());
+  } catch (e) {
+    $('#recents').innerHTML = '<li class="empty">读取失败</li>';
+  }
+}
+
+/**
+ * 点侧边栏的历史会话：直接在对话区把那次对话的消息铺出来（只读预览）。
+ *
+ * 它不改引擎的当前会话——引擎那边还在原来的会话上。所以顶上挂一条横幅说清楚，
+ * 想接着聊就点「继续这个会话」（= 从最后一步分叉，原会话一个字节不动）。
+ */
+async function previewSession(id, name) {
+  let d;
+  try {
+    d = await (await fetch('/sessions/view?id=' + encodeURIComponent(id))).json();
+    if (d.error) throw new Error(d.error);
+  } catch (e) {
+    addTrace('bad', '打开历史会话失败', e.message);
+    return;
+  }
+  PREVIEW = id;
+  showPage('chat');
+  chat.innerHTML = '';
+
+  const bar = el('div','banner');
+  const label = el('span'); label.textContent = '历史会话 · 只读';
+  const info = el('span','grow');
+  info.textContent = (name || id) + ' · ' + d.turns + ' 个回合 · ' + d.maxSeq + ' 个事件';
+  const go = el('button'); go.textContent = '继续这个会话';
+  go.title = '从最后一步分叉出新会话接着聊（原会话不动）';
+  go.onclick = () => forkFrom(id, d.maxSeq);
+  const back = el('button'); back.textContent = '回到当前会话';
+  back.onclick = () => backToCurrent();
+  const trace = el('button'); trace.textContent = '看事件轨迹';
+  trace.onclick = () => { showPage('sess'); openSession(id); };
+  bar.append(label, info, go, back, trace);
+  chat.appendChild(bar);
+
+  if (!d.messages.length) addTrace('', '这个会话还没有完整回合', '（可能刚建好就没再说话）');
+  for (const m of d.messages) {
+    if (m.role === 'user') addMsg('你', m.content);
+    else if (m.role === 'assistant') {
+      if (m.toolCalls?.length) addTrace('', '调用工具', m.toolCalls.join(', '));
+      if (m.content) addMsg('AI', m.content);
+    } else if (m.role === 'tool') addTrace('ok', '工具结果', cut(m.content, 160));
+  }
+  chat.scrollTop = 0;
+}
+
+/** 退出预览，回到当前会话（对话区按当前会话的历史重绘一次） */
+async function backToCurrent() {
+  PREVIEW = null;
+  chat.innerHTML = '';
+  const id = SESS.current;
+  if (!id) return;
+  try {
+    const d = await (await fetch('/sessions/view?id=' + encodeURIComponent(id))).json();
+    addTrace('', '当前会话', id + ' · ' + d.turns + ' 个回合（下面是重绘的历史，新消息会接着往下走）');
+    for (const m of d.messages || []) {
+      if (m.role === 'user') addMsg('你', m.content);
+      else if (m.role === 'assistant' && m.content) addMsg('AI', m.content);
+    }
+  } catch (e) {
+    addTrace('bad', '重绘当前会话失败', e.message);
+  }
+}
+
+/** 从某个会话的某一步分叉，并接着在对话区聊 */
+async function forkFrom(id, seq) {
+  try {
+    const r = await fetch('/sessions/fork', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, seq }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '分叉失败');
+    PREVIEW = null;
+    const bar = chat.querySelector('.banner');
+    if (bar) bar.remove();
+    addTrace('ok', '已接上这个会话', `新会话 ${d.sessionId}（恢复 ${d.turns} 个回合 / ${d.messages} 条消息），现在可以直接发消息`);
+  } catch (e) {
+    addTrace('bad', '接上会话失败', e.message);
+  }
+}
+
+// SSE 重连会把历史事件一次性重放，逐条刷新会打出几十个请求 → 合并成一次
+let recentsTimer = 0;
+function refreshRecents() {
+  clearTimeout(recentsTimer);
+  recentsTimer = setTimeout(loadRecents, 200);
+}
+
+async function loadSessions() {
+  try {
+    const d = await (await fetch('/sessions')).json();
+    SESS.current = d.current;
+    renderRecents(d);
+    const ul = $('#sesslist'); ul.innerHTML = '';
+    const all = withPendingCurrent(d);
+    if (!all.length) { ul.innerHTML = '<li class="empty">暂无（会话在你说第一句话时才建文件）</li>'; return; }
+    for (const s of all) {
+      const cur = s.sessionId === SESS.current;
+      const li = el('li', s.sessionId === SESS.id ? 'on' : '');
+      const t = el('span','t');
+      t.textContent = sessName(s).slice(0, 46);
+      const n = el('span','n');
+      const when = s.startedAt ? new Date(s.startedAt).toLocaleString() : '';
+      n.textContent = s.pending
+        ? '还没写入日志（说第一句话时才建文件）'
+        : `${s.events} 事件 · ${when}` + (s.forkedFrom ? ` · 分叉自 ${s.forkedFrom.sessionId}@${s.forkedFrom.seq}` : '');
+      li.append(t, n);
+      if (cur) { const c = el('span','cur'); c.textContent = '● 当前'; li.appendChild(c); }
+      if (!s.pending) li.appendChild(sessActions(s, cur));
+      li.onclick = () => {
+        if (s.pending) { $('#sessdetail').hidden = true; $('#sessmeta').textContent = '这个会话还没有日志文件——说第一句话之后才会有轨迹'; return; }
+        openSession(s.sessionId);
+      };
+      ul.appendChild(li);
+    }
+  } catch (e) {
+    $('#sesslist').innerHTML = '<li class="empty">读取失败: ' + e.message + '</li>';
+  }
+}
+
+/* ── 轨迹视图 ─────────────────────────────────────────────
+   数据来自 /sessions/view：trace 是服务端从事件流派生出的「按回合分层」结构，
+   这里只负责画：汇总栏 + 时间轴 + 账本 + 详情。
+   账本一页只有窗口内的事件（默认尾部一页），往上翻才加载更早的。 */
+const KINDS = [
+  ['user','你'], ['assistant','模型'], ['tool','工具'], ['approval','审批'],
+  ['context','上下文'], ['memory','记忆'], ['kb','资料库'], ['web','联网'],
+  ['subagent','子agent'], ['session','会话'], ['other','其它'],
+];
+const TRACE = { data: null, from: 0, sel: null, off: new Set(), q: '', range: null };
+
+const ms = (n) => (n === undefined || n === null ? '' : n >= 10000 ? (n / 1000).toFixed(1) + 's' : n >= 1000 ? (n / 1000).toFixed(2) + 's' : n + 'ms');
+const kTok = (n) => (n >= 100000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+
+function renderFilters() {
+  const box = $('#sessfilters'); box.innerHTML = '';
+  for (const [k, label] of KINDS) {
+    const c = el('span', 'chip f' + (TRACE.off.has(k) ? ' off' : ''));
+    c.textContent = label;
+    c.onclick = () => { TRACE.off.has(k) ? TRACE.off.delete(k) : TRACE.off.add(k); renderFilters(); renderLedger(); };
+    box.appendChild(c);
+  }
+}
+
+function rowVisible(r) {
+  if (TRACE.off.has(r.kind)) return false;
+  if (TRACE.range && (r.ts < TRACE.range[0] || r.ts > TRACE.range[1])) return false;
+  if (TRACE.q && !((r.label + ' ' + r.summary + ' ' + r.type).toLowerCase().includes(TRACE.q))) return false;
+  return true;
+}
+
+/** 汇总栏：只放我们真有的数（provider 没给 usage 就说没给，不编） */
+function renderSummary(d) {
+  const s = d.trace.summary;
+  const box = $('#sesssummary'); box.innerHTML = '';
+  const add = (label, value, warn) => {
+    const sp = el('span', warn ? 'warn' : '');
+    sp.append(document.createTextNode(label + ' '));
+    const b = el('b'); b.textContent = value; sp.appendChild(b);
+    box.appendChild(sp);
+  };
+  add('回合', String(s.turns));
+  add('步数', String(s.steps));
+  add('模型', ms(s.llmMs));
+  add('工具', ms(s.toolMs));
+  if (s.approvalMs) add('等审批', ms(s.approvalMs));
+  if (s.avgTtftMs !== undefined) add('首token均', ms(s.avgTtftMs));
+  if (s.usage) {
+    add('输入', kTok(s.usage.prompt) + ' tok');
+    add('输出', kTok(s.usage.completion) + ' tok');
+    if (s.usage.cached !== undefined && s.usage.prompt > 0) {
+      add('缓存命中', Math.round((s.usage.cached / s.usage.prompt) * 100) + '%');
+    }
+    if (s.tokPerSec) add('输出速度', s.tokPerSec + ' tok/s');
+    if (s.usageCalls < s.llmCalls) add('· 只有 ' + s.usageCalls + '/' + s.llmCalls + ' 次调用带回 usage', '', true);
+  } else {
+    add('token', '（这段没有 provider usage）', true);
+  }
+  add('· 窗口', '#' + d.window.from + '–#' + d.window.to + ' / 共 ' + d.maxSeq);
+}
+
+/** 时间轴：一行一个回合，段落按 模型/工具/审批 上色；拖选过滤 */
+function renderOverview(d) {
+  const box = $('#sessoverview'); box.innerHTML = '';
+  const turns = d.trace.turns;
+  if (!turns.length) { box.textContent = '（这一页里没有完整回合）'; return; }
+  const t0 = Math.min(...turns.map((t) => t.startTs));
+  const t1 = Math.max(...turns.map((t) => t.endTs ?? t.startTs + (t.stats.wallMs || 1000)));
+  const span = Math.max(1, t1 - t0);
+  const pct = (ts) => ((ts - t0) / span) * 100;
+
+  for (const t of turns) {
+    const row = el('div','ovrow');
+    const lab = el('span','lab'); lab.textContent = '#' + t.index;
+    lab.title = t.userText;
+    lab.onclick = () => { TRACE.range = null; TRACE.q = ''; $('#sesssearch').value = ''; renderLedger(t.turnId); };
+    const track = el('div','ovtrack');
+    // 回合整体范围先画一层底
+    for (const r of t.rows) {
+      if (!r.ms) continue;
+      const cls = r.kind === 'tool' ? 'tool' : r.kind === 'approval' ? 'approval' : r.kind === 'assistant' ? 'llm' : '';
+      if (!cls) continue;
+      const seg = el('div','ovseg ' + cls);
+      const start = r.ts - r.ms;
+      seg.style.left = pct(start) + '%';
+      seg.style.width = Math.max(0.6, (r.ms / span) * 100) + '%';
+      seg.title = `${r.label} · ${ms(r.ms)}\n${new Date(start).toLocaleTimeString()} → ${new Date(r.ts).toLocaleTimeString()}\n${r.summary}`;
+      track.appendChild(seg);
+    }
+    const st = el('span','st');
+    st.textContent = `${t.stats.steps} 步 · 模型 ${ms(t.stats.llmMs)} · 工具 ${ms(t.stats.toolMs)}` +
+      (t.stats.ttftMs !== undefined ? ` · 首token ${ms(t.stats.ttftMs)}` : '') +
+      (t.closed ? '' : ' · 未收尾');
+    row.append(lab, track, st);
+    box.appendChild(row);
+  }
+
+  // 拖选一段时间：只看这段时间里活跃的行；右键清除
+  let drag = null;
+  const marker = el('div','ovsel'); marker.hidden = true; box.appendChild(marker);
+  const xToTs = (e) => {
+    const track = box.querySelector('.ovtrack');
+    if (!track) return null;
+    const b = track.getBoundingClientRect();
+    return t0 + Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)) * span;
+  };
+  box.onmousedown = (e) => {
+    if (e.button !== 0) return;
+    const ts = xToTs(e); if (ts === null) return;
+    drag = { from: ts, x0: e.clientX };
+    marker.hidden = false;
+    marker.style.left = (e.clientX - box.getBoundingClientRect().left) + 'px';
+    marker.style.width = '1px';
+  };
+  box.onmousemove = (e) => {
+    if (!drag) return;
+    const b = box.getBoundingClientRect();
+    const x0 = Math.min(drag.x0, e.clientX) - b.left, w = Math.abs(e.clientX - drag.x0);
+    marker.style.left = x0 + 'px'; marker.style.width = Math.max(1, w) + 'px';
+  };
+  box.onmouseup = (e) => {
+    if (!drag) return;
+    const ts = xToTs(e);
+    const a = Math.min(drag.from, ts ?? drag.from), z = Math.max(drag.from, ts ?? drag.from);
+    drag = null;
+    if (z - a < 200) { TRACE.range = null; marker.hidden = true; }   // 当成一次点击
+    else TRACE.range = [a, z];
+    renderLedger();
+  };
+  box.oncontextmenu = (e) => { e.preventDefault(); TRACE.range = null; marker.hidden = true; renderLedger(); };
+}
+
+/** 账本：回合头（可折叠）+ 行；scrollToTurn 给定时滚到该回合 */
+function renderLedger(scrollToTurn) {
+  const d = TRACE.data;
+  const box = $('#sessledger'); box.innerHTML = '';
+  if (!d) return;
+
+  if (d.window.hasEarlier) {
+    const more = el('button','more');
+    more.textContent = `↑ 加载更早的 ${d.window.pageSize} 条事件（当前从 #${d.window.from} 开始）`;
+    more.onclick = () => {
+      more.disabled = true; more.textContent = '加载中…';
+      openSession(d.sessionId, d.to, Math.max(1, d.window.from - d.window.pageSize));
+    };
+    box.appendChild(more);
+  }
+
+  const blocks = [];
+  for (const b of d.trace.between) blocks.push({ kind: 'between', afterTurn: b.afterTurn, rows: b.rows });
+  d.trace.turns.forEach((t, i) => blocks.push({ kind: 'turn', order: i, turn: t }));
+  blocks.sort((a, b) => {
+    const ka = a.kind === 'between' ? a.afterTurn - 0.5 : a.order;
+    const kb = b.kind === 'between' ? b.afterTurn - 0.5 : b.order;
+    return ka - kb;
+  });
+
+  let shown = 0;
+  let target = null;
+  for (const b of blocks) {
+    if (b.kind === 'between') {
+      const rows = b.rows.filter(rowVisible);
+      if (!rows.length) continue;
+      const h = el('div','betweenhead');
+      h.textContent = `回合之间 · ${rows.length} 条（会话开始/改名、压缩、记忆蒸馏这些不属于任何回合）`;
+      box.appendChild(h);
+      for (const r of rows) { box.appendChild(rowEl(r)); shown++; }
+      continue;
+    }
+    const t = b.turn;
+    const rows = t.rows.filter(rowVisible);
+    const head = el('div','turnhead');
+    const folded = TRACE.folded?.has(t.turnId);
+    const caret = el('span'); caret.textContent = folded ? '▸' : '▾';
+    const idx = el('b'); idx.textContent = '回合 ' + t.index + (t.partial ? '（前半截在更早的页里）' : '');
+    const q = el('span','q'); q.textContent = t.userText || '(无提问)';
+    const st = el('span','st');
+    st.textContent = `${t.stats.steps} 步 · ${ms(t.stats.wallMs)} · 模型 ${ms(t.stats.llmMs)} · 工具 ${ms(t.stats.toolMs)}` +
+      (t.stats.usage ? ` · ${kTok(t.stats.usage.prompt)}→${kTok(t.stats.usage.completion)} tok` : '') +
+      (t.stats.ctxTokens !== undefined ? ` · 上下文 ${t.stats.ctxTokens}/${t.stats.ctxBudget}` : '');
+    head.append(caret, idx, q, st);
+    head.onclick = () => {
+      TRACE.folded = TRACE.folded || new Set();
+      TRACE.folded.has(t.turnId) ? TRACE.folded.delete(t.turnId) : TRACE.folded.add(t.turnId);
+      renderLedger();
+    };
+    box.appendChild(head);
+    if (scrollToTurn === t.turnId) target = head;
+    if (folded) continue;
+    if (!rows.length) { const e2 = el('div','empty'); e2.textContent = '（该回合的行都被筛掉了）'; box.appendChild(e2); continue; }
+    for (const r of rows) { box.appendChild(rowEl(r)); shown++; }
+  }
+  if (!shown) { const e2 = el('div','empty'); e2.textContent = '没有匹配的事件'; box.appendChild(e2); }
+  if (target) target.scrollIntoView({ block: 'start' });
+  renderRaw();
+  $('#sessmeta').textContent =
+    `显示 ${shown} 行` + (TRACE.range ? ' · 已按时间段筛选（右键时间轴清除）' : '') +
+    (TRACE.sel ? ` · 选中 #${TRACE.sel}` : '');
+}
+
+/** 是否有任何筛选生效（类型开关 / 搜索 / 时间段） */
+function filtering() {
+  return TRACE.off.size > 0 || Boolean(TRACE.q) || Boolean(TRACE.range);
+}
+
+/**
+ * 原始日志视图。筛选条对它同样生效——否则在这个模式下点筛选像是没反应。
+ * 没有任何筛选时给全量（包含 llm.delta / state.change 这些账本里不占行的噪音，
+ * 这也正是"原始"的意义）。
+ */
+function renderRaw() {
+  const d = TRACE.data;
+  const pre = $('#sesslines');
+  if (!d) { pre.textContent = ''; return; }
+  let lines = d.lines;
+  if (filtering()) {
+    const keepSeq = new Set();
+    for (const t of d.trace.turns) for (const r of t.rows) if (rowVisible(r)) keepSeq.add(r.seq);
+    for (const b of d.trace.between) for (const r of b.rows) if (rowVisible(r)) keepSeq.add(r.seq);
+    lines = d.lines.filter((l) => keepSeq.has(l.seq));
+  }
+  pre.textContent = lines.length
+    ? lines.map((l) => `#${String(l.seq).padStart(4)} ${l.text}`).join('\n')
+    : '（筛选后没有匹配的事件）';
+}
+
+function rowEl(r) {
+  const div = el('div', 'row k-' + r.kind + (r.ok === false ? ' bad' : '') + (TRACE.sel === r.seq ? ' on' : ''));
+  const sq = el('span','sq'); sq.textContent = '#' + r.seq;
+  const lb = el('span','lb'); lb.textContent = r.label;
+  const sm = el('span','sm'); sm.textContent = r.summary;
+  const tm = el('span','tm'); tm.textContent = r.ms !== undefined ? ms(r.ms) : '';
+  div.append(sq, lb, sm, tm);
+  div.title = new Date(r.ts).toLocaleString() + ' · ' + r.type;
+  div.onclick = () => selectRow(r);
+  return div;
+}
+
+/** 选中一行：右侧出详情，并把「当时的对话状态」和分叉点定到这一步 */
+function selectRow(r) {
+  TRACE.sel = r.seq;
+  const box = $('#sessinspect'); box.innerHTML = '';
+  const head = el('div','k');
+  head.textContent = `#${r.seq} ${r.label} · ${r.type} · ${new Date(r.ts).toLocaleString()}` + (r.ms !== undefined ? ` · 耗时 ${ms(r.ms)}` : '');
+  box.appendChild(head);
+  const body = el('div');
+  body.textContent = r.detail ? JSON.stringify(r.detail, null, 2) : r.summary || '（这条事件没有更多内容）';
+  box.appendChild(body);
+  renderLedger();
+  // 状态是「到这一步为止」重建的，所以要按 to=seq 再取一次
+  clearTimeout(SESS.timer);
+  SESS.timer = setTimeout(() => openSession(TRACE.data.sessionId, r.seq, TRACE.data.window.from, true), 120);
+}
+
+/**
+ * 打开一个会话的轨迹。
+ * to     = 状态重建到哪一步（点选某行时用它）
+ * from   = 事件窗口起点（往上翻页时用它）
+ * keep   = true 时保留当前选中/筛选状态（点行触发的刷新）
+ */
+async function openSession(id, to, from, keep) {
+  try {
+    const p = new URLSearchParams({ id });
+    if (to) p.set('to', String(to));
+    if (from) p.set('from', String(from));
+    const d = await (await fetch('/sessions/view?' + p.toString())).json();
+    if (d.error) throw new Error(d.error);
+    if (!keep) { TRACE.sel = null; TRACE.range = null; TRACE.q = ''; TRACE.folded = new Set(); $('#sesssearch').value = ''; }
+    TRACE.data = d;
+    SESS.id = d.sessionId; SESS.max = d.maxSeq;
+    $('#sessdetail').hidden = false;
+    $('#sesstitle').textContent = d.sessionId;
+    renderSummary(d);
+    renderOverview(d);
+    renderFilters();
+    renderLedger();
+    $('#sesslines').hidden = $('#sessledger').hidden;
+
+    const ul = $('#sessmsgs'); ul.innerHTML = '';
+    if (!d.messages.length) ul.innerHTML = '<li class="empty">该步之前还没有完整回合</li>';
+    for (const m of d.messages) {
+      const li = el('li');
+      const r = el('span','r');
+      r.textContent = m.role + (m.toolCalls?.length ? ` → ${m.toolCalls.join(', ')}` : '');
+      const c = el('span','c'); c.textContent = cut(m.content, 400);
+      li.append(r, c); ul.appendChild(li);
+    }
+    if (!keep) loadSessions();
+  } catch (e) {
+    $('#sessmeta').textContent = '打开失败: ' + e.message;
+  }
+}
+
+/** 进轨迹页时如果还没选会话，默认把当前会话摊开——否则页面看着像空的 */
+function autoOpenTrace() {
+  if (SESS.id || !SESS.current) return;
+  // 当前会话还没落盘（一句话没说）就没有轨迹可看
+  if (SESS.pending) {
+    $('#sessdetail').hidden = true;
+    $('#sessmeta').textContent = '当前会话还没有日志文件——说第一句话之后才会有轨迹';
+    return;
+  }
+  openSession(SESS.current);
+}
+
+$('#sesssearch').oninput = () => {
+  TRACE.q = $('#sesssearch').value.trim().toLowerCase();
+  renderLedger();
+};
+
+$('#sessraw').onclick = () => {
+  const pre = $('#sesslines');
+  pre.hidden = !pre.hidden;
+  $('#sessledger').hidden = !pre.hidden;
+  $('#sessraw').textContent = pre.hidden ? '原始日志' : '回到账本';
+  renderRaw();
+};
+
+$('#sessfork').onclick = async () => {
+  if (!SESS.id) return;
+  const seq = TRACE.sel ?? (TRACE.data?.to ?? SESS.max);
+  const btn = $('#sessfork'); btn.disabled = true;
+  try {
+    const r = await fetch('/sessions/fork', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: SESS.id, seq }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '分叉失败');
+    $('#sessmeta').textContent = `已从 #${seq} 分叉到 ${d.sessionId}（恢复 ${d.turns} 个回合 / ${d.messages} 条消息）`;
+    showPage('chat');
+  } catch (e) {
+    $('#sessmeta').textContent = '分叉失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/* 新建会话：只有对话页底部那一个入口 */
+$('#newsess').onclick = async () => {
+  const btn = $('#newsess'); btn.disabled = true;
+  try {
+    const r = await fetch('/sessions/new', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '新建失败');
+    $('#sessdetail').hidden = true; SESS.id = null;
+    showPage('chat');
+  } catch (e) {
+    addTrace('bad', '新建会话失败', e.message);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/* ── 资料库 ── */
+function kbMeta() {
+  $('#kbmeta').textContent = S.kbDocs ? S.kbDocs + ' 篇 · ' + S.kbChunks + ' 块' : '暂无资料';
+}
+
+/** 编辑态：正在改哪篇（null = 普通导入） */
+const KB = { editing: null, versionsOf: null };
+
+/** 时效三档（照 doarchon 的 wiki-freshness 分法）：只提示，不动数据 */
+const KB_FRESH_DAYS = 30;
+const KB_AGING_DAYS = 60;
+
+/** 一篇资料的时效档位。fresh 不打标——满屏绿标签等于没标 */
+function freshnessOf(ts) {
+  const days = Math.floor((Date.now() - ts) / 86400000);
+  if (days < KB_FRESH_DAYS) return null;
+  if (days < KB_AGING_DAYS) return { cls: 'aging', text: '待复核', title: `${days} 天没更新过，建议扫一眼是否还准确` };
+  return { cls: 'stale', text: '已过期', title: `${days} 天没更新过，内容很可能已经和现状不符，但它照样会被当权威注入` };
+}
+
+/** 相对时间：给资料时效性用，「3 天前」比时间戳直观 */
+function ago(ts) {
+  const d = Math.floor((Date.now() - ts) / 86400000);
+  if (d <= 0) return '今天';
+  if (d < 30) return d + ' 天前';
+  if (d < 365) return Math.floor(d / 30) + ' 个月前';
+  return Math.floor(d / 365) + ' 年前';
+}
+
+/** 导入告警：疑似密钥 + 疑似重复。只提示，不阻止入库 */
+function kbShowWarnings(title, w) {
+  const box = $('#kbwarn');
+  const lines = [];
+  if (w && w.secrets && w.secrets.length) {
+    lines.push(`《${title}》里有 ${w.secrets.length} 处疑似密钥/凭证，已照原文入库——资料会被拼进模型提示词，确认后建议改成占位符重新导入：`);
+    for (const s of w.secrets.slice(0, 8)) lines.push(`  第 ${s.line} 行 · ${s.kind} · ${s.preview}`);
+    if (w.secrets.length > 8) lines.push(`  …还有 ${w.secrets.length - 8} 处`);
+  }
+  if (w && w.duplicates && w.duplicates.length) {
+    if (lines.length) lines.push('');
+    lines.push('内容和已有资料高度重合，检索时会互相挤占预算，考虑合并或归档其中一篇：');
+    for (const d of w.duplicates.slice(0, 5)) {
+      lines.push(`  《${d.title}》${d.identical ? ' · 内容完全一致' : ' · 相似度 ' + Math.round(d.similarity * 100) + '%'}`);
+    }
+  }
+  box.hidden = lines.length === 0;
+  box.textContent = lines.join('\n');
+}
+
+/** 版本面板：列出当前版本 + history 里留下的旧版本，可查看原文、可回滚 */
+async function kbShowVersions(doc) {
+  const box = $('#kbvers');
+  if (KB.versionsOf === doc.id) { KB.versionsOf = null; box.hidden = true; box.innerHTML = ''; return; }
+  KB.versionsOf = doc.id;
+  box.hidden = false;
+  box.innerHTML = '';
+  const head = el('div','vrow');
+  const ht = el('span','t'); ht.textContent = `《${doc.title}》的版本`;
+  const close = el('button'); close.textContent = '收起';
+  close.onclick = () => { KB.versionsOf = null; box.hidden = true; box.innerHTML = ''; };
+  head.append(ht, close); box.appendChild(head);
+  let d;
+  try {
+    const r = await fetch('/kb/versions?id=' + encodeURIComponent(doc.id));
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || '读取失败');
+  } catch (e) {
+    const err = el('div','vrow'); err.textContent = '读取版本失败: ' + e.message;
+    box.appendChild(err); return;
+  }
+  const pre = el('pre'); pre.hidden = true;
+  for (const v of d.versions) {
+    const row = el('div','vrow');
+    const t = el('span','t');
+    t.textContent = `v${v.version} · ${v.chars} 字 · ${ago(v.ts)}` + (v.current ? ' · 当前生效' : '');
+    row.appendChild(t);
+    const view = el('button'); view.textContent = '查看原文';
+    view.onclick = async () => {
+      const r = await fetch('/kb/raw?id=' + encodeURIComponent(doc.id) + '&version=' + v.version);
+      const dd = await r.json();
+      pre.hidden = false;
+      pre.textContent = r.ok ? dd.text : '读取失败: ' + (dd.error || '');
+    };
+    row.appendChild(view);
+    if (!v.current) {
+      // 对比：跟当前生效版本比，只显示改动处 + 上下 2 行
+      const diff = el('button'); diff.textContent = '对比当前';
+      diff.title = `看清 v${v.version} 和当前版本之间改了哪几行`;
+      diff.onclick = async () => {
+        const r = await fetch('/kb/diff?id=' + encodeURIComponent(doc.id) + '&from=' + v.version);
+        const dd = await r.json();
+        pre.hidden = false;
+        if (!r.ok) { pre.textContent = '对比失败: ' + (dd.error || ''); return; }
+        pre.innerHTML = '';
+        const head = el('div');
+        head.textContent = `v${dd.from} → v${dd.to}：+${dd.stat.added} 行 / -${dd.stat.removed} 行` +
+          (dd.stat.truncated ? '（文档太大，退化成整体替换）' : '');
+        pre.appendChild(head);
+        if (!dd.stat.added && !dd.stat.removed) {
+          const same = el('div'); same.textContent = '两版内容完全一致';
+          pre.appendChild(same); return;
+        }
+        for (const l of dd.lines) {
+          const row2 = el('div', 'dl ' + l.op);
+          if (l.gap) row2.textContent = `  ⋯ 省略 ${l.gap} 行未改动`;
+          else row2.textContent = (l.op === 'add' ? '+ ' : l.op === 'del' ? '- ' : '  ') + l.text;
+          pre.appendChild(row2);
+        }
+      };
+      row.appendChild(diff);
+
+      const back = el('button'); back.textContent = '回滚到这一版';
+      back.title = '把这一版的内容当成一次新导入（版本号继续往前走，历史不会被抹掉）';
+      back.onclick = async () => {
+        if (!confirm(`把《${doc.title}》回滚到 v${v.version}？\n\n会生成一个新版本（内容 = v${v.version}），当前内容会进历史存档。`)) return;
+        const r = await fetch('/kb/rollback', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ id: doc.id, version: v.version }) });
+        const dd = await r.json();
+        if (!r.ok) { $('#kbstatus').textContent = '回滚失败: ' + (dd.error || ''); return; }
+        $('#kbstatus').textContent = `已回滚《${dd.doc.title}》到 v${v.version} 的内容（现在是 v${dd.doc.version}，${dd.chunks} 块）`;
+        KB.versionsOf = null; box.hidden = true; box.innerHTML = '';
+        loadKbDocs();
+      };
+      row.appendChild(back);
+    }
+    box.appendChild(row);
+  }
+  box.appendChild(pre);
+}
+
+/** 退出编辑态，按钮和输入框都恢复成「导入」 */
+function kbCancelEdit() {
+  KB.editing = null;
+  $('#kbimport').textContent = '导入';
+  $('#kbtitle').value = '';
+  $('#kbtext').value = '';
+  $('#kbcancel').hidden = true;
+}
+async function loadKbDocs() {
+  try {
+    const r = await fetch('/kb/list');
+    const d = await r.json();
+    S.kbDocs = d.docCount; S.kbChunks = d.chunkCount; kbMeta();
+    $('#rawcount').textContent = d.docCount;
+    const ul = $('#kbdocs'); ul.innerHTML = '';
+    if (!d.docs.length) { ul.innerHTML = '<li class="empty">暂无</li>'; return; }
+    for (const doc of d.docs) {
+      const off = doc.status !== 'active';
+      const li = el('li', off ? 'off' : '');
+      const t = el('span','t'); t.textContent = doc.title;
+      const n = el('span','n');
+      n.textContent = doc.chunks + ' 块 · ' + doc.chars + ' 字 · v' + doc.version + ' · ' + doc.source + ' · ' + ago(doc.ts);
+      const ops = el('span','ops kbops');
+      li.append(t, n);
+      // 蒸馏标记：有「摘要+别名」索引块的，检索时问法对不上也能被捞出来
+      if (doc.digest) {
+        const tag = el('span','tag');
+        tag.textContent = '已蒸馏';
+        tag.title = '有摘要+别名索引块：问法和原文用词不一致时也能命中（别名只参与打分，不会注入）';
+        li.appendChild(tag);
+      }
+      // 时效巡检三档：太久没更新的资料标出来，别让过期文档一直被当权威注入
+      const fresh = freshnessOf(doc.ts);
+      if (fresh) {
+        const tag = el('span','tag ' + fresh.cls);
+        tag.textContent = fresh.text;
+        tag.title = fresh.title;
+        li.appendChild(tag);
+      }
+
+      // 编辑：把原文读回上面的输入框，保存后 = 同标题重新导入（版本 +1，旧分块整体替换）
+      const edit = el('button'); edit.textContent = '编辑';
+      edit.title = '把原文读回编辑框，改完保存会生成新版本';
+      edit.onclick = async () => {
+        try {
+          const rr = await fetch('/kb/raw?id=' + encodeURIComponent(doc.id));
+          const dd = await rr.json();
+          if (!rr.ok) throw new Error(dd.error || '读取失败');
+          $('#kbtitle').value = dd.title;
+          $('#kbtext').value = dd.text;
+          KB.editing = doc.id;
+          $('#kbimport').textContent = '保存修改';
+          $('#kbcancel').hidden = false;
+          $('#kbstatus').textContent = `正在编辑《${dd.title}》v${dd.version}，保存后会变成 v${dd.version + 1}（旧分块整体替换）`;
+          $('#kbtext').scrollIntoView({ block: 'center' });
+        } catch (e) {
+          $('#kbstatus').textContent = '读取原文失败: ' + e.message;
+        }
+      };
+      ops.appendChild(edit);
+
+      // 版本：看历史版本、必要时回滚（history 里只有加过归档之后的版本）
+      const ver = el('button'); ver.textContent = 'v' + doc.version;
+      ver.title = '查看历史版本、回滚';
+      ver.onclick = () => kbShowVersions(doc);
+      ops.appendChild(ver);
+
+      const arc = el('button'); arc.textContent = off ? '恢复' : '归档';
+      arc.title = off ? '重新参与检索' : '不参与检索，但原文和分块都留着';
+      arc.onclick = async () => {
+        await fetch('/kb/archive', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ id: doc.id, restore: off }) });
+        loadKbDocs();
+      };
+      ops.appendChild(arc);
+
+      const del = el('button','danger'); del.textContent = '删除';
+      del.title = '原文和索引一起删掉，不可恢复';
+      del.onclick = async () => {
+        if (!confirm(`删除《${doc.title}》？\n\n原文（.glassbox/kb/raw/）和索引会一起删掉，不可恢复。\n只是想让它不参与检索的话，用「归档」。`)) return;
+        const r2 = await fetch('/kb/delete', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ id: doc.id }) });
+        const d2 = await r2.json();
+        if (!r2.ok) { $('#kbstatus').textContent = '删除失败: ' + (d2.error || ''); return; }
+        if (KB.editing === doc.id) kbCancelEdit();
+        if (KB.versionsOf === doc.id) { KB.versionsOf = null; $('#kbvers').hidden = true; $('#kbvers').innerHTML = ''; }
+        $('#kbstatus').textContent = `已删除《${doc.title}》`;
+        loadKbDocs();
+      };
+      ops.appendChild(del);
+
+      li.appendChild(ops); ul.appendChild(li);
+    }
+  } catch (e) {
+    $('#kbstatus').textContent = '读取清单失败: ' + e.message;
+  }
+}
+async function kbImport(text, title, source) {
+  const r = await fetch('/kb/import', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ text, title, source }) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || '导入失败');
+  return d;
+}
+$('#kbcancel').onclick = () => { kbCancelEdit(); $('#kbstatus').textContent = '已退出编辑'; };
+
+$('#kbreindex').onclick = async () => {
+  const btn = $('#kbreindex'), status = $('#kbstatus');
+  if (!confirm('按当前切块参数把所有资料重新切一遍？\n\n原文和版本号都不变，只是重建索引（改过 chunker 参数后才需要）。')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/kb/reindex', { method:'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    status.textContent = `已重新索引 ${d.docs} 篇 · ${d.chunks} 块` +
+      (d.missing && d.missing.length ? `（${d.missing.length} 篇读不到原文：${d.missing.join('、')}）` : '');
+    loadKbDocs();
+  } catch (e) {
+    status.textContent = '重新索引失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// 蒸馏：要调模型，所以是显式动作。默认只处理没蒸过的（重新导入过的算没蒸过）
+$('#kbdistill').onclick = async () => {
+  const btn = $('#kbdistill'), status = $('#kbstatus');
+  btn.disabled = true;
+  status.textContent = '正在蒸馏（要调模型，稍等）…';
+  try {
+    const r = await fetch('/kb/distill', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    const okList = d.done.map((x) => `《${x.title}》${x.aliases} 个别名`).join('、');
+    status.textContent = d.done.length
+      ? `已蒸馏 ${d.done.length} 篇：${okList}` + (d.failed.length ? `；失败 ${d.failed.length} 篇：${d.failed.join('、')}` : '')
+      : (d.failed.length ? '全部失败：' + d.failed.join('、') : '没有需要蒸馏的资料');
+    loadKbDocs();
+  } catch (e) {
+    status.textContent = '蒸馏失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/* 块级上下文：一篇一次模型调用（状态判断要看到全篇）。默认只处理还有块没补的资料 */
+$('#kbctx').onclick = async () => {
+  const btn = $('#kbctx'), status = $('#kbstatus');
+  btn.disabled = true;
+  status.textContent = '正在补块上下文（要调模型，一篇一次调用）…';
+  try {
+    const r = await fetch('/kb/context', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '失败');
+    const okList = d.done.map((x) =>
+      `《${x.title}》${x.chunks} 块` +
+      (x.rejected ? `（${x.rejected} 块编了数字被丢）` : '') +
+      (x.missing ? `（${x.missing} 块模型没给）` : '')
+    ).join('、');
+    status.textContent = d.done.length
+      ? `已补 ${okList} · 全库 ${d.total}/${d.chunks} 块有上下文` +
+        (d.failed.length ? `；失败 ${d.failed.length} 篇：${d.failed.join('、')}` : '')
+      : (d.failed.length ? '全部失败：' + d.failed.join('、') : `没有需要补的块（全库 ${d.total}/${d.chunks}）`);
+    loadKbDocs();
+  } catch (e) {
+    status.textContent = '补块上下文失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$('#kbimport').onclick = async () => {  const btn = $('#kbimport'), status = $('#kbstatus');
+  const files = [...$('#kbfile').files];
+  const pasted = $('#kbtext').value.trim();
+  if (!files.length && !pasted) { status.textContent = '先粘贴内容或选择文件'; return; }
+  btn.disabled = true;
+  $('#kbwarn').hidden = true;
+  try {
+    // 编辑态：只走粘贴框那条路，标题保持不变 = 同一篇的新版本
+    if (KB.editing) {
+      const d = await kbImport(pasted, $('#kbtitle').value.trim(), 'edit');
+      kbCancelEdit();
+      kbShowWarnings(d.doc.title, d.warnings);
+      status.textContent = `已保存《${d.doc.title}》v${d.doc.version}（${d.chunks} 块，旧分块已替换）`;
+      loadKbDocs();
+      return;
+    }
+    const done = [];
+    let lastWarn = null;
+    for (const f of files) {
+      const d = await kbImport(await f.text(), files.length === 1 ? $('#kbtitle').value.trim() : '', f.name);
+      done.push(d.doc.title + '（' + d.chunks + ' 块）');
+      lastWarn = { title: d.doc.title, w: d.warnings };
+    }
+    if (pasted) {
+      const d = await kbImport(pasted, $('#kbtitle').value.trim(), 'paste');
+      done.push(d.doc.title + '（' + d.chunks + ' 块）');
+      lastWarn = { title: d.doc.title, w: d.warnings };
+      $('#kbtext').value = '';
+    }
+    if (lastWarn) kbShowWarnings(lastWarn.title, lastWarn.w);
+    $('#kbtitle').value = ''; $('#kbfile').value = '';
+    status.textContent = '已导入 ' + done.join('、');
+    loadKbDocs();
+  } catch (e) {
+    status.textContent = '导入失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/* ── chat 渲染 ── */
+function addMsg(who, text) {
+  const m = el('div','msg ' + (who === '你' ? 'user' : 'ai'));
+  const w = el('div','who'); w.textContent = who === '你' ? 'you' : 'agent';
+  const b = el('div','body'); b.textContent = text || '';
+  m.append(w, b); chat.appendChild(m); scroll(); return b;
+}
+function addTrace(kind, label, detail) {
+  const t = el('div','trace ' + (kind || ''));
+  const b = el('b'); b.textContent = label;
+  const d = el('span'); d.textContent = detail || '';
+  t.append(b, d); chat.appendChild(t); scroll();
+}
+function scroll(){ chat.scrollTop = chat.scrollHeight; }
+function logLine(text, ts) {
+  const d = el('div');
+  const t = el('span', 't');
+  t.textContent = new Date(ts ?? Date.now()).toTimeString().slice(0, 8);
+  d.append(t, document.createTextNode(text));
+  logBox.appendChild(d);
+  while (logBox.children.length > 200) logBox.removeChild(logBox.firstChild);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+const cut = (s, n = 110) => { s = String(s).replace(/\s+/g,' ').trim(); return s.length > n ? s.slice(0,n)+'…' : s; };
+
+/* ── 面板渲染 ── */
+function renderSkills() {
+  const ul = $('#skills'); ul.innerHTML = '';
+  if (!S.skills.length) { ul.innerHTML = '<li class="empty">—</li>'; return; }
+  for (const s of S.skills) {
+    const li = el('li'); const m = el('span','mark' + (S.activated.has(s) ? ' on' : ''));
+    m.textContent = S.activated.has(s) ? '★' : '·';
+    li.append(m, document.createTextNode(' ' + s)); ul.appendChild(li);
+  }
+}
+function renderTools() {
+  const ul = $('#tools'); ul.innerHTML = '';
+  if (!S.tools.length) { ul.innerHTML = '<li class="empty">暂无</li>'; return; }
+  for (const t of S.tools.slice(-8)) {
+    const li = el('li');
+    const m = el('span','mark ' + (t.status === 'done' ? 'ok' : t.status === 'bad' ? 'bad' : ''));
+    m.textContent = t.status === 'done' ? '✓' : t.status === 'bad' ? '✗' : '⋯';
+    li.append(m, document.createTextNode(' ' + t.name + ' ' + cut(t.args, 60)));
+    if (t.result) { const s = el('span','sub'); s.textContent = '→ ' + cut(t.result, 120); li.appendChild(s); }
+    ul.appendChild(li);
+  }
+}
+function renderSubs() {
+  $('#subsec').hidden = S.subs.length === 0;
+  const ul = $('#subs'); ul.innerHTML = '';
+  for (const s of S.subs) {
+    const li = el('li'); const m = el('span','mark ' + (s.done ? 'ok' : ''));
+    m.textContent = s.done ? '✓' : '⋯';
+    li.append(m, document.createTextNode(' "' + cut(s.task, 46) + '"'));
+    if (s.done) { const x = el('span','sub'); x.textContent = '用了: ' + (s.tools.join(', ') || '无'); li.appendChild(x); }
+    ul.appendChild(li);
+  }
+}
+function renderApprovals() {
+  const ul = $('#approvals'); ul.innerHTML = '';
+  if (!S.approvals.length) { ul.innerHTML = '<li class="empty">无需审批</li>'; return; }
+  for (const a of S.approvals.slice(-6)) {
+    const li = el('li');
+    const m = el('span','mark ' + (a.decided ? (a.approved ? 'ok' : 'bad') : ''));
+    m.textContent = a.decided ? (a.approved ? '✓' : '✗') : '⋯';
+    li.append(m, document.createTextNode(' [' + a.level + '] ' + cut(a.summary, 52)));
+    ul.appendChild(li);
+  }
+}
+function renderActs() {
+  const ul = $('#acts'); ul.innerHTML = '';
+  if (!S.acts.length) { ul.innerHTML = '<li class="empty">—</li>'; return; }
+  for (const a of S.acts.slice(-8)) {
+    const li = el('li');
+    const k = el('span', 'k ' + (a.ok ? a.kind : 'bad')); k.textContent = a.ok ? a.label : '✗ ' + a.label;
+    const d = el('span','d'); d.textContent = a.detail;
+    const n = el('span','n');
+    if (a.kind === 'created' || a.kind === 'edited') {
+      if (a.added) { const p = el('span','p'); p.textContent = '+' + a.added; n.appendChild(p); }
+      if (a.removed) { const m = el('span','m'); m.textContent = ' −' + a.removed; n.appendChild(m); }
+    } else if (a.kind === 'read' && a.added) n.textContent = a.added + ' 行';
+    else if (a.kind === 'searched') n.textContent = '命中 ' + (a.added || 0);
+    else if (a.kind === 'delegated' && a.added) n.textContent = a.added + ' 步';
+    li.append(k, d, n); ul.appendChild(li);
+  }
+}
+function actSummary(s) {
+  const parts = [];
+  if (s.created) parts.push('创建 ' + s.created);
+  if (s.edited) parts.push('修改 ' + s.edited);
+  if (s.ran) parts.push('执行 ' + s.ran);
+  if (s.other) parts.push('其它 ' + s.other);
+  return parts.length ? parts.join(' · ') : '暂无活动';
+}
+function renderCompactions() {
+  const ul = $('#compactions'); ul.innerHTML = '';
+  for (const c of S.compactions.slice(-2)) { const li = el('li'); li.textContent = '⚑ ' + c; ul.appendChild(li); }
+}
+function setState(s) {
+  for (const k of STATES) stateEls[k].classList.toggle('on', k === s);
+}
+
+/* ── 审批弹窗 ── */
+let currentApproval = null;
+function showApproval(id, req, canRemember) {
+  currentApproval = id;
+  $('#mlevel').textContent = req.level;
+  $('#mlevel').className = 'badge ' + req.level;
+  $('#msummary').textContent = req.summary;
+  // 「始终允许」只在 confirm 且没被标记记忆旁路时给：
+  // dangerous 一次点头不该换永久授权，关键配置文件（package.json 等）每次都要单独看
+  $('#malways').hidden = !canRemember;
+  const r = $('#mreason'); r.hidden = !req.reason; r.textContent = req.reason ? '原因：' + req.reason : '';
+  const d = $('#mdiff');
+  if (req.preview) {
+    d.hidden = false; d.innerHTML = '';
+    for (const line of req.preview.split('\n')) {
+      const sp = el('span', line.startsWith('+') ? 'a' : line.startsWith('-') ? 'd' : '');
+      sp.textContent = line + '\n'; d.appendChild(sp);
+    }
+  } else d.hidden = true;
+  $('#veil').classList.add('show');
+}
+async function decide(decision) {
+  if (currentApproval == null) return;
+  const id = currentApproval; currentApproval = null;
+  $('#veil').classList.remove('show');
+  await fetch('/approve', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ id, decision }) });
+}
+$('#mallow').onclick = () => decide('allow');
+$('#malways').onclick = () => decide('always');
+$('#mdeny').onclick = () => decide('deny');
+document.addEventListener('keydown', (e) => {
+  if (!$('#veil').classList.contains('show')) return;
+  if (e.key === 'Escape') decide('deny');
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) decide('allow');
+});
+
+/* ── 事件处理：和 TUI 面板同一套逻辑，只是换了画布 ── */
+function handle(ev) {
+  switch (ev.type) {
+    case 'plugin.loaded': logLine('插件 ' + ev.name + ': ' + ev.tools.join(', '), ev.ts); break;
+    case 'skill.available':
+      S.skills = ev.skills; renderSkills();
+      logLine('Skills 可用: ' + (ev.skills.join(', ') || '无'), ev.ts);
+      break;
+    case 'skill.loaded': {
+      /* 目录模式下正文走 skill 工具，不再经过 context.injected，面板只能认这条事件 */
+      S.activated.add(ev.name); renderSkills();
+      const how = { tool: '模型加载', gesture: '用户点名', trigger: '触发词注入' }[ev.via] || ev.via;
+      const note = ev.name + '（' + how + '）~' + ev.tokensEst + 'tok' + (ev.truncated ? '，已截断' : '');
+      addTrace('', '加载技能', note);
+      logLine('加载技能: ' + note, ev.ts);
+      break;
+    }
+    case 'memory.loaded':
+      S.memTotal = ev.count;
+      $('#memmeta').textContent = 'L1 原子 ' + S.memTotal + ' 条';
+      if (ev.count) logLine('载入 ' + ev.count + ' 条历史记忆', ev.ts);
+      break;
+
+    case 'turn.start':
+      // 正看着历史会话时来了新回合：先退出预览，别把历史和实时混成一片
+      if (PREVIEW) { PREVIEW = null; chat.innerHTML = ''; addTrace('', '已退出历史预览', '下面是当前会话的实时内容'); }
+      addMsg('你', ev.userText); logLine('▶ 回合开始: ' + cut(ev.userText, 40), ev.ts); break;
+    case 'llm.request': S.streamed = false; S.aiBody = null; logLine('→ 请求模型 (' + ev.messages.length + ' 条)', ev.ts); break;
+    case 'llm.delta':
+      if (!S.aiBody) { S.aiBody = addMsg('AI',''); S.streamed = true; }
+      S.aiBody.textContent += ev.text; scroll();
+      break;
+    case 'llm.response':
+      if (ev.response.toolCalls && ev.response.toolCalls.length) {
+        logLine('← 要调用: ' + ev.response.toolCalls.map(c => c.name).join(', '), ev.ts);
+      } else {
+        logLine('← 文本回复', ev.ts);
+        if (!S.streamed && ev.response.text) addMsg('AI', ev.response.text);
+      }
+      break;
+
+    case 'state.change': setState(ev.to); break;
+
+    case 'context.injected':
+      if (ev.contributions.length) {
+        for (const c of ev.contributions) if (c.source.startsWith('skill:')) S.activated.add(c.source.slice(6));
+        renderSkills();
+        addTrace('', '注入上下文', ev.contributions.map(c => c.source).join(', '));
+        logLine('注入上下文: ' + ev.contributions.map(c => c.source).join(', '), ev.ts);
+      }
+      break;
+    case 'context.usage': {
+      const pct = ev.budget ? Math.min(100, (ev.tokens / ev.budget) * 100) : 0;
+      $('#ctxbar').classList.toggle('over', ev.tokens > ev.budget);
+      $('#ctxbar').firstElementChild.style.width = pct + '%';
+      $('#ctxmeta').textContent = ev.tokens + ' / ' + ev.budget + ' tok · ' + ev.messages + ' 条消息';
+      break;
+    }
+    case 'context.compacted':
+      S.compactions.push('压缩：丢弃 ' + ev.droppedMessages + ' 条，' + ev.tokensBefore + '→' + ev.tokensAfter + ' tok');
+      renderCompactions(); addTrace('', '上下文压缩', ev.tokensBefore + '→' + ev.tokensAfter + ' tok');
+      logLine('⚑ 上下文压缩 ' + ev.tokensBefore + '→' + ev.tokensAfter + ' tok', ev.ts);
+      break;
+
+    case 'tool.call':
+      S.tools.push({ name: ev.call.name, args: JSON.stringify(ev.call.args), status: 'run' });
+      renderTools(); addTrace('', '调用工具', ev.call.name + ' ' + cut(JSON.stringify(ev.call.args), 70));
+      logLine('⚙ ' + ev.call.name + ' ' + cut(JSON.stringify(ev.call.args), 40), ev.ts);
+      break;
+    case 'tool.result': {
+      const t = [...S.tools].reverse().find(x => x.status === 'run');
+      if (t) { t.status = ev.result.ok ? 'done' : 'bad'; t.result = ev.result.content; }
+      renderTools(); addTrace(ev.result.ok ? 'ok' : 'bad', ev.result.ok ? '工具结果' : '工具失败', cut(ev.result.content, 130));
+      logLine((ev.result.ok ? '✓ ' : '✗ ') + cut(ev.result.content, 40), ev.ts);
+      break;
+    }
+
+    case 'activity.updated': {
+      S.acts = ev.entries;
+      $('#actmeta').textContent = actSummary(ev.summary);
+      renderActs();
+      break;
+    }
+
+    case 'approval.ask':
+      showApproval(ev.id, ev.request, ev.memorable);
+      S.approvals.push({ level: ev.request.level, summary: ev.request.summary, decided: false });
+      renderApprovals();
+      logLine('⚠ 请求审批(' + ev.request.level + '): ' + cut(ev.request.summary, 30), ev.ts);
+      break;
+    case 'approval.decision': {
+      const a = [...S.approvals].reverse().find(x => !x.decided);
+      if (a) { a.decided = true; a.approved = ev.approved; }
+      renderApprovals(); addTrace(ev.approved ? 'ok' : 'bad', ev.approved ? '审批放行' : '审批拒绝', ev.request.summary);
+      logLine((ev.approved ? '✓ 审批放行: ' : '✗ 审批拒绝: ') + cut(ev.request.summary, 30), ev.ts);
+      break;
+    }
+
+    case 'subagent.start':
+      S.subs.push({ task: ev.task, tools: [], done: false }); renderSubs();
+      logLine('⇩ 子agent 开始: ' + cut(ev.task, 34), ev.ts);
+      break;
+    case 'subagent.end': {
+      const s = [...S.subs].reverse().find(x => !x.done);
+      if (s) { s.done = true; s.tools = ev.toolsUsed; }
+      renderSubs();
+      logLine('⇧ 子agent 完成（' + ev.steps + ' 步）', ev.ts);
+      break;
+    }
+
+    case 'memory.distilled':
+      S.memTotal = ev.total; $('#memmeta').textContent = 'L1 原子 ' + S.memTotal + ' 条';
+      logLine('记忆蒸馏 +' + ev.atoms.length + '（共 ' + ev.total + '）', ev.ts); break;
+    case 'memory.injected': {
+      const ul = $('#mem'); ul.innerHTML = '';
+      if (ev.items.length) {
+        $('#memmeta').textContent = 'L1 原子 ' + S.memTotal + ' 条 · 注入 ' + ev.items.length +
+          ' 条（' + ev.usedTokens + '/' + ev.budget + ' tok，丢 ' + ev.dropped +
+          (ev.hiddenByFork ? '，分叉屏蔽 ' + ev.hiddenByFork : '') + '）';
+        for (const i of ev.items) {
+          const li = el('li'); const m = el('span','mark on'); m.textContent = '◆';
+          li.append(m, document.createTextNode(' (' + i.kind + ') ' + cut(i.text, 60))); ul.appendChild(li);
+        }
+        addTrace('', '记忆注入', ev.items.length + ' 条');
+        logLine('记忆注入 ' + ev.items.length + ' 条（' + ev.usedTokens + '/' + ev.budget + ' tok）', ev.ts);
+      } else if (ev.hiddenByFork) {
+        $('#memmeta').textContent = 'L1 原子 ' + S.memTotal + ' 条 · 命中的 ' + ev.hiddenByFork + ' 条因分叉被屏蔽';
+        logLine('记忆命中 ' + ev.hiddenByFork + ' 条，但都产生于分叉点之后 → 已屏蔽', ev.ts);
+      }
+      break;
+    }
+
+    case 'session.started': {
+      const from = ev.forkedFrom ? `（分叉自 ${ev.forkedFrom.sessionId}@${ev.forkedFrom.seq}）` : '';
+      // 全新会话不带上文：把对话区清干净，免得旧对话看起来还在上下文里
+      if (!ev.forkedFrom && !ev.resumed) { chat.innerHTML = ''; S.streamed = false; S.aiBody = null; PREVIEW = null; }
+      addTrace(ev.forkedFrom ? 'ok' : '', ev.forkedFrom ? '会话分叉' : ev.resumed ? '会话续跑' : '新会话', ev.sessionId + (ev.forkedFrom ? ' ← ' + ev.forkedFrom.sessionId + '@' + ev.forkedFrom.seq : ''));
+      logLine('🗂 会话 ' + (ev.resumed ? '续跑' : '新建') + ' ' + ev.sessionId + from, ev.ts);
+      refreshRecents();
+      if (!$('#sess').hidden) loadSessions();
+      break;
+    }
+
+    case 'session.renamed':
+      logLine('🏷 会话改名为「' + cut(ev.title, 30) + '」', ev.ts);
+      refreshRecents();
+      break;
+
+    case 'kb.loaded':
+      S.kbDocs = ev.docs; S.kbChunks = ev.chunks; kbMeta();
+      if (ev.docs) logLine('资料库: ' + ev.docs + ' 篇 / ' + ev.chunks + ' 块', ev.ts);
+      break;
+    case 'kb.imported':
+      logLine('📚 导入「' + cut(ev.title, 24) + '」v' + ev.version + ' → ' + ev.chunks + ' 块', ev.ts);
+      addTrace('ok', '资料导入', ev.title + ' · ' + ev.chunks + ' 块 · ' + ev.chars + ' 字');
+      break;
+    case 'kb.injected': {
+      const ul = $('#kbhits'); ul.innerHTML = '';
+      // 每回合先清掉上一轮的正文与口径，免得看着像这一轮的
+      const why = $('#kbwhy'), btn = $('#kbshowtext'), box = $('#kbtext-injected');
+      box.hidden = true; box.textContent = ''; btn.textContent = '查看注入正文';
+      // 「为什么没检索到」：查询串是去过停用词、可能拼了上一轮关键词之后的，不是原话
+      const lines = [];
+      if (!ev.items.length) lines.push('这一轮没有注入任何资料');
+      if (ev.query) lines.push('查询串: ' + ev.query + (ev.usedPrev ? '（借了上一轮关键词）' : ''));
+      const dropped = [];
+      if (ev.belowThreshold) dropped.push(ev.belowThreshold + ' 段低于阈值');
+      if (ev.cappedByDoc) dropped.push(ev.cappedByDoc + ' 段被同篇上限挡下');
+      if (ev.dropped) dropped.push(ev.dropped + ' 段超预算');
+      if (dropped.length) lines.push('丢弃: ' + dropped.join(' · '));
+      why.hidden = lines.length === 0;
+      why.textContent = lines.join('\n');
+      // 注入正文：GB_KB_LOG_TEXT=0 时事件里没有 content，这时按钮不该出现
+      btn.hidden = !ev.content;
+      if (ev.content) {
+        box.textContent = ev.content;
+        btn.onclick = () => {
+          box.hidden = !box.hidden;
+          btn.textContent = box.hidden ? '查看注入正文' : '收起注入正文';
+        };
+      }
+      if (!ev.items.length) break;
+      $('#kbmeta').textContent = S.kbDocs + ' 篇 · ' + S.kbChunks + ' 块 · 注入 ' + ev.items.length +
+        ' 段（' + ev.usedTokens + '/' + ev.budget + ' tok，命中 ' + ev.considered + ' 丢 ' + ev.dropped + '）';
+      for (const i of ev.items) {
+        const li = el('li'); const m = el('span','mark on'); m.textContent = '◆';
+        const where = i.headingPath ? i.title + ' > ' + i.headingPath : i.title;
+        li.append(m, document.createTextNode(' ' + cut(where, 56)));
+        const s = el('span','sub');
+        s.textContent = 'BM25 ' + i.score + ' · ' + i.tokens + ' tok' + (i.neighbor ? ' · 上文' : '');
+        li.appendChild(s); ul.appendChild(li);
+      }
+      addTrace('', '资料库注入', ev.items.length + ' 段（' + ev.usedTokens + ' tok）');
+      logLine('📚 资料注入 ' + ev.items.length + ' 段（' + ev.usedTokens + '/' + ev.budget + ' tok）', ev.ts);
+      break;
+    }
+
+    /* 检索改写：零命中时换检索词再来一轮。改写本身要可见——
+     * 「为什么这次答上来了」和「为什么还是没检索到」都得能当场看清。 */
+    case 'kb.rewritten': {
+      const why = ev.reason === 'no-hit' ? '零命中' : '弱命中';
+      const desc = ev.picked
+        ? why + '：' + cut(ev.original, 24) + ' → ' + cut(ev.picked, 24) + '（' + ev.before + '→' + ev.after + ' 段）'
+        : why + '：' + cut(ev.original, 24) + ' · 候选都不如原来，保持不注入';
+      addTrace(ev.picked ? 'ok' : 'bad', '检索改写', desc);
+      logLine('🔁 检索改写 ' + (ev.picked ? ev.before + '→' + ev.after + ' 段' : '未采用'), ev.ts);
+      break;
+    }
+
+    /* 自动验证：改完文件跑项目自己的检查。「它凭什么说改好了」靠这条看 */
+    case 'verify.started':
+      addTrace('', '自动验证', '跑 ' + cut(ev.cmd, 40) + '（' + ev.from + '）');
+      logLine('🔬 自动验证 ' + cut(ev.cmd, 30), ev.ts);
+      break;
+
+    case 'verify.done': {
+      const head = (ev.output || '').split('\n').filter(Boolean).slice(-3).join(' / ');
+      addTrace(ev.ok ? 'ok' : 'bad', '自动验证',
+        (ev.ok ? '通过' : '未通过') + ' · ' + ev.ms + 'ms' + (ev.ok ? '' : ' · ' + cut(head, 90)));
+      logLine('🔬 验证' + (ev.ok ? '通过' : '未通过') + ' ' + ev.ms + 'ms', ev.ts);
+      break;
+    }
+
+    /* 任务计划：模型自己维护的清单。被机械约束拒掉的那次也要看得见 */
+    case 'plan.updated': {
+      const mark = { done: '✔', doing: '▶', pending: '○' };
+      const view = (ev.items || []).map(i => i.id + (mark[i.status] || '?') + ' ' + i.text).join('　');
+      addTrace(ev.ok ? 'ok' : 'bad', '任务计划',
+        (ev.ok ? '' : '被拒：') + ev.message + (view ? ' · ' + cut(view, 120) : ''));
+      logLine('🧭 计划 ' + (ev.ok ? '' : '被拒：') + ev.message, ev.ts);
+      break;
+    }
+
+    case 'kb.contextualized': {
+      const n = ev.docs.reduce((a, d) => a + d.chunks, 0);
+      logLine('📚 补块上下文 ' + n + ' 块（全库 ' + ev.total + '）', ev.ts);
+      addTrace(ev.failed.length ? 'bad' : 'ok', '补块上下文',
+        ev.docs.map(d => d.title + ' +' + d.chunks + (d.rejected ? '（丢 ' + d.rejected + '）' : '')).join('、') +
+        (ev.failed.length ? ' · 失败：' + ev.failed.join('；') : ''));
+      break;
+    }
+
+    /* 知识目录：注入的是「有哪些条目」的清单，不是正文。落选原因一起显示——
+     * 「为什么这页没进目录」和「为什么这段没检索到」是同一类问题，都得能当场看见。 */
+    case 'wiki.injected': {
+      const skipped = ev.skipped || [];
+      const stale = ev.stale || [];
+      const desc = ev.items.length
+        ? ev.items.length + ' 条（' + ev.usedTokens + '/' + ev.budget + ' tok）' +
+          (stale.length ? ' · 已过期 ' + stale.length + '：' + cut(stale.join('、'), 60) : '') +
+          (skipped.length ? ' · 落选 ' + skipped.length + '：' + cut(skipped.map(s => s.ref + ' ' + s.why).join('、'), 70) : '')
+        : (skipped.length ? '没有可用条目 · ' + cut(skipped.map(s => s.ref + ' ' + s.why).join('、'), 70) : '还没有条目');
+      addTrace(ev.items.length ? (stale.length ? 'warn' : '') : 'bad', '知识目录', desc);
+      if (ev.items.length) logLine('🗂 知识目录 ' + ev.items.length + ' 条（' + ev.usedTokens + ' tok' + (stale.length ? '，' + stale.length + ' 条已过期' : '') + '）', ev.ts);
+      break;
+    }
+
+    case 'wiki.summarized':
+      logLine('🗂 补摘要 ' + ev.pages.length + ' 条' + (ev.failed.length ? '，失败 ' + ev.failed.length : ''), ev.ts);
+      addTrace(ev.failed.length ? 'bad' : 'ok', '补摘要与别名',
+        ev.pages.map(p => p.ref + '（别名 ' + p.aliases + '）').join('、') +
+        (ev.failed.length ? ' · 失败：' + ev.failed.join('；') : ''));
+      break;
+
+    case 'web.request': {
+      const desc = ev.url.replace(/^https?:\/\//, '') +
+        (ev.status ? ' ' + ev.status : '') +
+        (ev.bytes ? ' · ' + Math.round(ev.bytes / 1024) + 'KB' : '') +
+        ' · ' + ev.ms + 'ms' + (ev.note ? ' · ' + ev.note : '');
+      addTrace(ev.ok ? 'ok' : 'bad', ev.ok ? '联网' : '联网失败', cut(desc, 110));
+      logLine((ev.ok ? '🌐 ' : '✗ ') + cut(desc, 46), ev.ts);
+      break;
+    }
+
+    case 'turn.limit':
+      addTrace('bad', '步数用尽', '上限 ' + ev.maxSteps + ' 次工具调用，已要求模型收尾');
+      logLine('⚑ 步数用尽（上限 ' + ev.maxSteps + '）', ev.ts);
+      break;
+    case 'turn.aborted':
+      addTrace('bad', '被中断', '已执行 ' + ev.steps + ' 次工具调用，历史保留');
+      logLine('✂ 回合被中断（已执行 ' + ev.steps + ' 次工具调用）', ev.ts);
+      break;
+    case 'turn.end':
+      logLine('■ 回合结束', ev.ts);
+      // 一个回合结束后，侧边栏那条的「首个提问 / 事件数」才需要更新
+      refreshRecents();
+      break;
+    case 'web.busy': setBusy(ev.busy); break;
+    case 'web.ready':
+      setBusy(ev.busy); $('#dot').classList.add('live');
+      // 新连接会先重放黑匣子历史，这条分界线让"历史"和"实时"不至于混成一片
+      logLine('———— 以上为历史回放，以下为实时 ————', ev.ts);
+      refreshRecents();
+      break;
+    case 'web.notice': addTrace('bad', '提示', ev.text); break;
+  }
+}
+
+function setBusy(b) {
+  $('#send').disabled = b;
+  // 「停止」只在有回合在跑的时候露出来：空闲时点它没有任何意义
+  $('#stop').hidden = !b;
+  $('#dot').classList.toggle('busy', b);
+  if (!b) $('#dot').classList.add('live');
+}
+
+$('#stop').onclick = async () => {
+  const r = await fetch('/abort', { method: 'POST' });
+  if (!r.ok) addTrace('bad', '提示', '现在没有回合在跑');
+};
+
+/* ── 输入 ── */
+const input = $('#input');
+input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(160, input.scrollHeight) + 'px'; });
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('#send').onclick = send;
+async function send() {
+  // 只有对话页能发消息（输入框本身也只在对话页显示，这里是第二道闸）
+  if (!$('#composer') || $('#composer').hidden) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = ''; input.style.height = 'auto';
+  showPage('chat');
+  await fetch('/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+}
+
+/* ── 连接事件流 ── */
+const es = new EventSource('/events');
+es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch {} };
+es.onerror = () => { $('#dot').classList.remove('live','busy'); };
+setState('idle');
+{
+  const p = location.hash.replace('#', '');
+  showPage(PAGES.includes(p) ? p : 'chat');
+}
+</script>
+</body>
+</html>

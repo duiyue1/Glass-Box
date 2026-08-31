@@ -1,0 +1,167 @@
+{
+  "name": "kb-ab-v1",
+  "note": "资料库 A/B 评测集。依赖 .glassbox/kb 里已导入的《调度服务 SDD》与《提效助手内部约定》。expectKeywords 是「答对了就必然出现」的字面串；negative=true 表示资料里没有，正确行为是明确说没有而不是编。",
+  "cases": [
+    {
+      "id": "F1",
+      "dimension": "事实查找",
+      "question": "调度服务的分布式锁租约是多久，续租周期是多久？",
+      "expectKeywords": ["30", "10"],
+      "reference": "租约 30 秒，续租周期 10 秒。"
+    },
+    {
+      "id": "F2",
+      "dimension": "事实查找",
+      "question": "抢锁失败之后怎么处理？等多久、重试几次？",
+      "expectKeywords": ["3", "跳过"],
+      "reference": "先等 3 秒再重试，重试 3 次仍失败则告警并跳过本次调度，等下一周期再抢；跳过会在 job_run 写 skipped 记录、原因码 LOCK_BUSY。"
+    },
+    {
+      "id": "F3",
+      "dimension": "数字精确",
+      "question": "一致性哈希的虚拟节点数是多少？投递失败最多退回几次？",
+      "expectKeywords": ["160", "10"],
+      "reference": "虚拟节点 160 个；投递失败最多退回 10 次，超过标记 dispatch_failed。"
+    },
+    {
+      "id": "P1",
+      "dimension": "私有约定",
+      "question": "周三的值班代号是什么？交接时间是几点？",
+      "expectKeywords": ["灰隼", "14:40"],
+      "reference": "值班代号「灰隼」，交接时间 14:40。"
+    },
+    {
+      "id": "P2",
+      "dimension": "私有约定",
+      "question": "资料归档编号是什么格式？2026 年的编号举个例子。",
+      "expectKeywords": ["TX-7"],
+      "reference": "TX- 加四位数字，2026 年起首位固定用 7，例如 TX-7031。"
+    },
+    {
+      "id": "P3",
+      "dimension": "私有约定",
+      "question": "归档编号冲突了怎么办？",
+      "expectKeywords": ["200"],
+      "reference": "编号冲突时统一往后加 200，不是加 1。"
+    },
+    {
+      "id": "R1",
+      "dimension": "反直觉",
+      "question": "抢锁失败的等待用的是指数退避吗？为什么？",
+      "expectKeywords": ["固定"],
+      "reference": "不是指数退避，用固定间隔；因为调度周期是分钟级，指数退避容易跨过整个周期。"
+    },
+    {
+      "id": "R2",
+      "dimension": "反直觉",
+      "question": "续租失败了应该把当前任务跑完还是中断？",
+      "expectKeywords": ["中断"],
+      "reference": "必须立刻中断，标记 interrupted，下一轮重新抢锁；继续跑会出现两个实例同时执行同一 job。"
+    },
+    {
+      "id": "X1",
+      "dimension": "跨章节",
+      "question": "抢锁异常时的排查顺序是什么？时钟偏移的阈值是多少？",
+      "expectKeywords": ["TTL", "5 秒"],
+      "reference": "先看租约是否过期（TTL lock:job:{job_id}），再看时钟偏移是否超过 5 秒，最后看慢任务是否阻塞续租线程。"
+    },
+    {
+      "id": "X2",
+      "dimension": "跨章节",
+      "question": "锁相关的监控指标有哪几个？哪个设了绝对阈值？",
+      "expectKeywords": ["续租失败"],
+      "reference": "四个：抢锁成功率、抢锁平均等待时长、续租失败次数、强制解锁次数；只有续租失败次数设绝对阈值（1 小时超过 3 次告警）。"
+    },
+    {
+      "id": "D1",
+      "dimension": "被否决方案",
+      "question": "为什么不用 ZooKeeper 做分布式锁？",
+      "expectKeywords": ["ZooKeeper"],
+      "reference": "语义最干净但部署环境没有现成 ZK 集群，单独维护三节点不划算，且跨机房写入延迟波动大。"
+    },
+    {
+      "id": "N1",
+      "dimension": "资料里没有",
+      "question": "调度服务的熔断阈值配置在哪个文件里？",
+      "negative": true,
+      "reference": "资料里完全没提熔断，正确行为是说明资料中没有相关内容。"
+    },
+    {
+      "id": "N2",
+      "dimension": "资料里没有",
+      "question": "值班同学的手机号在文档里是怎么写的？",
+      "negative": true,
+      "reference": "文档明确说联系人信息在内部通讯录、不在本文档维护，正确行为是说没有。"
+    },
+    {
+      "id": "N3",
+      "dimension": "干扰负例",
+      "question": "调度服务的 QPS 上限是多少？",
+      "negative": true,
+      "reference": "资料里没有服务 QPS 上限。文中出现的「QPS 到 200」说的是被否决的 MySQL 行锁方案压测时开始出现锁等待的点，不是调度服务的 QPS 上限，拿它当答案就是误答。"
+    },
+    {
+      "id": "S1",
+      "dimension": "同义表述",
+      "question": "锁的续期线程多久执行一次？",
+      "expectKeywords": ["10 秒"],
+      "reference": "续租周期 10 秒，由持有者自己的后台线程做。（原文用「续租」，问的是「续期」）"
+    },
+    {
+      "id": "S2",
+      "dimension": "同义表述",
+      "question": "争抢锁没成功时的等待策略是固定间隔还是逐步加长？为什么？",
+      "expectKeywords": ["固定"],
+      "reference": "固定间隔（3 秒），不用指数退避；因为调度周期是分钟级，指数退避容易直接跨过整个周期，反而让任务被跳过得更多。（原文用「抢锁失败」，问的是「争抢锁没成功」）"
+    },
+    {
+      "id": "S3",
+      "dimension": "同义表述",
+      "question": "派发任务时用什么算法决定交给哪个 worker 分组？",
+      "expectKeywords": ["一致性哈希"],
+      "reference": "按 job_id 做一致性哈希，虚拟节点 160 个。（原文用「分发」，问的是「派发」）"
+    },
+    {
+      "id": "M1",
+      "dimension": "多轮指代",
+      "turns": ["调度服务的分布式锁租约是多久？", "它的续租周期呢？"],
+      "expectKeywords": ["10"],
+      "reference": "续租周期 10 秒。（第二轮是纯指代句，没有主语）"
+    },
+    {
+      "id": "M2",
+      "dimension": "多轮指代",
+      "turns": ["抢锁失败之后怎么处理？", "上面说的重试期间会占用分发器主线程吗？"],
+      "expectKeywords": ["延迟队列"],
+      "reference": "不占用主线程，任务放进延迟队列到点再取出重试，所以单个 job 抢锁失败不会拖慢其他 job 的分发。"
+    },
+    {
+      "id": "C1",
+      "dimension": "跨文档冲突",
+      "question": "周三值班交接是几点？两份资料说的一致吗？",
+      "expectKeywords": ["14:40", "14:00"],
+      "reference": "两份资料不一致：《调度服务 SDD》说周三 14:00 交接，《提效助手内部约定》说固定 14:40。正确行为是同时召回两处并指出冲突。"
+    },
+    {
+      "id": "L1",
+      "dimension": "长尾细节",
+      "question": "任务的可中断点粒度有什么约定？",
+      "expectKeywords": ["5 秒"],
+      "reference": "约定不超过 5 秒一个可中断点，这样从续租失败到真正停下来的延迟不超过 5 秒。"
+    },
+    {
+      "id": "L2",
+      "dimension": "长尾细节",
+      "question": "跳过率的周指标要求是多少？",
+      "expectKeywords": ["0.5"],
+      "reference": "要求每周低于 0.5%，超过就要排查 worker 是否有慢任务堆积。"
+    },
+    {
+      "id": "L3",
+      "dimension": "长尾细节",
+      "question": "注册中心不可用时，worker 权重快照最长能沿用多久？之后怎么办？",
+      "expectKeywords": ["10 分钟"],
+      "reference": "最长沿用 10 分钟，之后拒绝新任务投递并告警。"
+    }
+  ]
+}
