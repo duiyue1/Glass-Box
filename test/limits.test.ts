@@ -9,6 +9,7 @@ import { Loop, type Llm } from '../src/engine/loop.ts';
 import { loadPlugins } from '../src/engine/plugin.ts';
 import { subagentPlugin } from '../src/plugins/subagentPlugin.ts';
 import type { Msg, LlmResponse, Tool, WireEvent } from '../src/engine/types.ts';
+import { safeAssess } from '../src/engine/types.ts';
 
 /** 永远要求调用同一个工具的模型——模拟"卡在反复 grep"的真实故障 */
 class AlwaysToolLlm implements Llm {
@@ -334,6 +335,93 @@ test('subagent 使用父级注入的模型，而不是内置假模型', async ()
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test('默认只读子 agent：没有 write_file / edit_file，delegate 本身是 safe', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-sub-ro-'));
+  try {
+    fs.writeFileSync(path.join(ws, 'a.txt'), 'hello\n');
+    // 让子 agent 去试着写：应该拿不到这个工具
+    const llm: Llm = {
+      async complete(msgs: Msg[]): Promise<LlmResponse> {
+        const last = msgs.at(-1);
+        if (last?.role === 'tool') return { text: `工具回复：${last.content.slice(0, 40)}` };
+        return { toolCalls: [{ id: 'c1', name: 'write_file', args: { path: 'a.txt', content: 'x' } }] };
+      },
+    };
+    const tools = new ToolRegistry();
+    loadPlugins([subagentPlugin(ws, llm)], { tools, wire: new Wire(), workspace: ws });
+    const delegate = tools.get('delegate')!;
+
+    assert.equal(delegate.assess!({ task: 'x' }).level, 'safe');
+    const out = await delegate.run({ task: '把 a.txt 改掉' });
+    assert.equal(out.ok, true);
+    assert.equal(fs.readFileSync(path.join(ws, 'a.txt'), 'utf8'), 'hello\n', '只读子 agent 不该改到文件');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('write:true 的子 agent 能改文件，但每次写入都过父级审批', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-sub-rw-'));
+  try {
+    fs.writeFileSync(path.join(ws, 'a.txt'), 'hello\n');
+    const llm: Llm = {
+      async complete(msgs: Msg[]): Promise<LlmResponse> {
+        const last = msgs.at(-1);
+        if (last?.role === 'tool') return { text: `写完了：${last.content.slice(0, 40)}` };
+        return { toolCalls: [{ id: 'c1', name: 'edit_file', args: { path: 'a.txt', old: 'hello', new: 'bye' } }] };
+      },
+    };
+
+    // 父级审批者：记录被问了几次
+    const asked: string[] = [];
+    const parent = {
+      decide: async (req: { toolName: string }) => {
+        asked.push(req.toolName);
+        return true;
+      },
+    };
+
+    const tools = new ToolRegistry();
+    loadPlugins([subagentPlugin(ws, llm, parent)], { tools, wire: new Wire(), workspace: ws });
+    const delegate = tools.get('delegate')!;
+
+    // 派一个可写子 agent 出去，这件事本身值得让人看一眼
+    assert.equal(delegate.assess!({ task: 'x', write: true }).level, 'confirm');
+
+    const out = await delegate.run({ task: '把 hello 改成 bye', write: true });
+    assert.equal(out.ok, true);
+    assert.equal(fs.readFileSync(path.join(ws, 'a.txt'), 'utf8'), 'bye\n');
+    assert.deepEqual(asked, ['edit_file'], '子 agent 的写入必须问到父级审批者，否则 delegate 就是一条绕过审批的通道');
+    assert.match(out.content, /改动的文件/, '改了哪些文件要冒泡回主 agent');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('可写子 agent 的写入被父级拒绝时，文件一个字节都不动', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-sub-deny-'));
+  try {
+    fs.writeFileSync(path.join(ws, 'a.txt'), 'hello\n');
+    const llm: Llm = {
+      async complete(msgs: Msg[]): Promise<LlmResponse> {
+        const last = msgs.at(-1);
+        if (last?.role === 'tool') return { text: `被拒了：${last.content.slice(0, 30)}` };
+        return { toolCalls: [{ id: 'c1', name: 'edit_file', args: { path: 'a.txt', old: 'hello', new: 'bye' } }] };
+      },
+    };
+    const tools = new ToolRegistry();
+    loadPlugins([subagentPlugin(ws, llm, { decide: async () => false })], {
+      tools,
+      wire: new Wire(),
+      workspace: ws,
+    });
+    await tools.get('delegate')!.run({ task: '改掉它', write: true });
+    assert.equal(fs.readFileSync(path.join(ws, 'a.txt'), 'utf8'), 'hello\n');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 // ---- 只读工具批次并行 ----
 
 interface Probe {
@@ -400,6 +488,42 @@ test('一次返回多个只读检索：同时跑，不再排队', async () => {
   assert.equal(stat.max, 3, '三个只读调用应该同时在跑');
   const first = events.find((e) => e.type === 'tool.call');
   assert.ok(first && first.type === 'tool.call' && first.parallel === 3, '并发这件事必须在事件流里看得见');
+});
+
+test('parallelSafe 让有副作用但彼此独立的工具也能并行（delegate 就靠它）', async () => {
+  const stat: Probe = { max: 0, inFlight: 0, runs: 0 };
+  const tools = new ToolRegistry();
+  // 不是 cacheable（子 agent 有自己的副作用，结果也不该复用），但彼此独立
+  tools.register(probe('delegate', stat, { cacheable: false, parallelSafe: true, assess: safeAssess }));
+  const { run } = runBatch(tools, [
+    { id: 'c1', name: 'delegate', args: { task: 'a' } },
+    { id: 'c2', name: 'delegate', args: { task: 'b' } },
+    { id: 'c3', name: 'delegate', args: { task: 'c' } },
+  ]);
+  await run();
+
+  assert.equal(stat.runs, 3, '不是 cacheable，所以三个都要真跑（不会被复用掉）');
+  assert.equal(stat.max, 3, '三个子任务应该同时在跑');
+});
+
+test('需要审批的 parallelSafe 工具不并行——可写子 agent 走的就是这条路', async () => {
+  const stat: Probe = { max: 0, inFlight: 0, runs: 0 };
+  const tools = new ToolRegistry();
+  tools.register(
+    probe('delegate', stat, {
+      cacheable: false,
+      parallelSafe: true,
+      assess: () => ({ level: 'confirm' as const, summary: '派一个可写子 agent' }),
+    }),
+  );
+  const { run } = runBatch(tools, [
+    { id: 'c1', name: 'delegate', args: { task: 'a', write: true } },
+    { id: 'c2', name: 'delegate', args: { task: 'b', write: true } },
+  ]);
+  await run();
+
+  assert.equal(stat.runs, 2);
+  assert.equal(stat.max, 1, '要审批就得排队，否则几个弹窗同时冒出来人不知道在批哪个');
 });
 
 test('并行的结果仍按模型给的顺序入账，不按谁先跑完', async () => {

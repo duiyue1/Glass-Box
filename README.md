@@ -3,7 +3,7 @@
 [![CI](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.18-brightgreen)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
-![tests](https://img.shields.io/badge/tests-419-brightgreen)
+![tests](https://img.shields.io/badge/tests-452-brightgreen)
 
 > 一个跑在终端里的迷你 coding agent。它的特别之处不在"又一个 agent"，而在**把 agent 的内部机制装进玻璃盒**——状态机、工具调用、审批、Skills、记忆、上下文压缩，每一刻都看得见。引擎全自写、无黑盒；零凭证即可跑通。
 
@@ -14,7 +14,8 @@
 - **引擎自写，没有黑盒**：turn 状态机（loop）、事件总线（wire）、工具执行、审批——每一层都能直接读源码。
 - **一切走事件总线**：引擎内部每个动作都以事件广播出去，TUI 面板、记忆子系统都只是"事件的订阅者"。这让内部状态对你透明。
 - **插件化**：工具（读写/搜索/执行）、模型、能力都是可插拔的插件，加能力不改引擎。
-- **安全默认值**：四级审批（含**硬拒绝**）+ 真实路径归属判断 + 危险命令识别 + `.git` 与跨工作区写拒绝，有风险的操作先向你确认。
+- **安全默认值**：四级审批（含**硬拒绝**）+ 真实路径归属判断 + 危险命令识别 + `.git` 与跨工作区写拒绝，有风险的操作先向你确认；
+  再不放心就 `--sandbox`，让它在一份 git worktree 副本里跑，跑完只给你 diff。
 - **零凭证可跑**：`FakeLlm` 用规则冒充模型，无需任何 API key 就能跑通完整链路；配上真实模型也只换一个实现。
 
 设计灵感来自：cchenhao-coding-tui（自写引擎/FAKE_LLM）、deepseek-harness（everything is a plugin）、Claude Code（Skills/Subagent/分级审批）、kimi-code（分层 streaming 界面）、TencentDB-Agent-Memory（分层记忆 + 预算检索）。
@@ -49,6 +50,36 @@ npm run typecheck
 # 6) 在别的目录上跑（工作区就是安全边界的原点，不必 cd 过去）
 node src/index.ts "整理一下这个项目" --workspace ~/some/repo
 ```
+
+### 让它在隔离副本里跑（`--sandbox`）
+
+前面那套审批 / 硬拒绝 / 路径归属都属于**"不让它做坏事"**，而它们都建立在"判断得对"之上。
+`--sandbox` 补的是另一半：**"做了坏事也不影响你的工作树"**。
+
+```bash
+# 在一份 git worktree 工作副本里跑，跑完只给你 diff
+node src/index.ts "把 getCwd 全部重命名成 getCurrentWorkingDirectory" --sandbox
+
+# 脚本里用：拿到补丁自己决定怎么处理（--json 永不自动合入）
+node src/index.ts "任务" --sandbox --json | tail -1 | jq -r '.sandbox.patch' > change.diff
+
+# 确认过流程了，直接合入
+node src/index.ts "任务" --sandbox --apply
+```
+
+几条刻意的设计：
+
+- **用 `git worktree` 而不是 clone**：两者共用同一个对象库，开一份几乎不占空间也几乎不花时间。
+- **副本放系统临时目录，不放工作区里**。放里面的话 agent 自己就能看到、改到那份副本，隔离就没意义了。
+- **从 `HEAD` 出发**，所以你**未提交的改动不会带进去**（启动时会提示这一点）。
+- **合入用 `git apply`**，只动工作树：不碰分支、不产生提交、不改 HEAD。合进来就是一份普通的未提交改动，
+  想留就 commit，不想留 `git checkout -- .` 就没了。打不上会如实报错且什么都不改。
+- **改了东西的副本不自动删**，因为这次跑的会话日志和黑匣子都在里面，出问题还要回看；
+  一个字都没改才顺手清掉。终端里会打印"在哪 / 怎么看 diff / 怎么删"。
+- **它不是容器**：agent 在副本里仍然能执行命令、能（经审批）读工作区外的文件。
+  它挡的是"改坏你的代码"，不是"越权访问系统"。要那一层还得靠容器或 seccomp。
+
+要求工作区是一个**有过至少一次提交**的 git 仓库，否则明确报错并以退出码 `2` 退出。
 
 ### 塞进脚本和流水线
 
@@ -111,11 +142,17 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
 
 假模型和真实模型共用同一套工具指令（真实模型通过 `ACTION: <指令>` 触发）：
 
-- `read <path>` — 读文件（工作区内 safe；工作区外需 dangerous 审批；凭证类文件 deny；图片会作为图像交给模型）
+- `read <path>` — 读文件（工作区内 safe；工作区外需 dangerous 审批；凭证类文件 deny；图片会作为图像交给模型）。
+  **带行号返回**，默认最多 2000 行（`GB_READ_MAX_LINES` 可调）；原生 tool calling 下可传 `offset` / `limit` 分段读。
+  截断时会告诉模型全文多少行、下一段怎么读——只截不说会让它以为自己看到了全文。
+  **只读了一段不算"读过"**：`write_file` 的"必须先读过"这道门要的是整篇，否则等于允许它拿三分之一的内容去覆盖整个文件
 - `write <path> :: <内容>` — 写文件（confirm；写 `.git` 下 / 工作区外 / 凭证类文件一律 deny）。
   **覆盖已存在的文件必须先 `read` 过它**，读过之后又被外部改动同样拒绝——覆盖式写入丢掉的内容找不回来。
   审批时显示 diff，两头没变的行折叠掉
-- `edit <path> ||| <旧文本> ||| <新文本>` — 精确 search/replace 编辑，审批时显示 diff（要求旧文本唯一）
+- `edit <path> ||| <旧文本> ||| <新文本>` — 精确 search/replace 编辑，审批时显示 diff。
+  默认要求旧文本**唯一**；出现多次会如实告诉它出现了几次，并指出可以传 `all: true` 一起替换
+  （改一个变量名就该走这条路，否则它只会反复试更长的上下文）。批量替换时审批摘要会写清要动几处——
+  改 40 处和改 1 处风险完全不同。替换按**字面**处理，`old`/`new` 里的正则元字符和 `$&` 都不做展开
 - `run <命令>` — 执行 shell 命令。默认前台、超时 120 秒、输出头尾截断。
   等级：`confirm` 起步；命中危险模式（`rm -rf`、`sudo`、`git reset` 等）升 `dangerous`；
   **命令里的路径也参与判定**——越出工作区或碰到 `.git` 升 `dangerous`，碰到凭证类文件直接 `deny`。
@@ -128,7 +165,12 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
 - `glob <文件名模式>` — 按文件名找文件（safe），支持 `**` / `*` / `?` / `{a,b}`，按最近修改排序
 - `web <搜索词>` — 联网搜索（confirm；零 key，爬搜索引擎结果页），返回 5 条 标题/链接/摘要
 - `fetch <url>` — 抓网页正文并转纯文本（confirm；内网/本机地址一律拒绝）
-- `delegate <子任务>` — 下放给只读、隔离的子 agent
+- `delegate <子任务>` — 下放给一个上下文隔离的子 agent。
+  默认**只读**（read / glob / grep / fetch），`delegate` 本身是 safe；
+  传 `write: true` 让它能改文件——这时 `delegate` 升为 `confirm`，而且**它每一次写入都会问到你**
+  （用的是主 agent 同一个审批者）。否则「delegate: 把 package.json 的 test 脚本改掉」就成了一条绕过审批的通道。
+  可写子 agent 不给联网：能改代码又能拉外部内容，等于一条把外部输入直接写进仓库的路。
+  **多个只读子任务可以在同一步里一起派出去，会并行执行**；可写的走不到并行（要审批的批次一律排队）
 - `echo <文本>` — 回显（调试用）
 
 ## 接外部工具（MCP）
@@ -179,7 +221,8 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
   墙上时间从"相加"变成"取最大"。只对**全是只读且都不需要审批**的批次生效；
   混进写操作、或有一个要点确认，整批退回排队
 - `GB_MCP=0` — 不连任何 MCP 服务器（默认：有 `.glassbox/mcp.json` 就连）
-- `GB_SUB_MAX_STEPS` — 子 agent 的步数上限（默认 6）
+- `GB_SUB_MAX_STEPS` — 子 agent 的步数上限（只读默认 6；可写默认 12——它要读、要改、要复核）
+- `GB_READ_MAX_LINES` — `read_file` 一次最多返回多少行（默认 2000，超出会截断并告诉模型怎么读下一段）
 - `GB_SHELL_TIMEOUT` — 前台 `run_command` 的默认超时毫秒（默认 120000，与自动验证对齐；模型可自己调到上限 600000）。
   原来写死 10 秒，`npm install` / `npm test` / `go build` 没有一个跑得完
 - `GB_SHELL_BG_TIMEOUT` — 后台任务的兜底超时（默认 600000，上限 3600000）。到点强杀，进程退出时也会收掉，不留孤儿
@@ -226,6 +269,7 @@ src/
 │   ├── toolRegistry.ts #   工具登记处
 │   ├── plugin.ts       #   Plugin 抽象 + loadPlugins
 │   ├── approval.ts     #   分级审批者 + 「始终允许」会话记忆
+│   ├── sandbox.ts      #   隔离工作副本（git worktree）+ 取 diff + 打回主仓库
 │   ├── redact.ts       #   图片脱敏（真数据只走模型请求，事件流留占位）
 │   └── tokens.ts       #   token 估算（图片按固定成本折算）
 ├── plugins/            # fs(read/write/edit) / search(glob+grep) / shell / web / subagent

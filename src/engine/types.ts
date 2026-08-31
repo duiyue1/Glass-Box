@@ -234,6 +234,17 @@ export interface Tool {
    */
   cacheable?: boolean;
   /**
+   * 同一批调用里可以和兄弟并发执行，即使它不是 `cacheable`。
+   *
+   * `cacheable` 顺带表达了"只读且顺序无关"，所以它自动可并行；但有些工具只读性质
+   * 不成立（比如 `delegate` 派出去的子 agent 有自己的副作用）却仍然彼此独立。
+   * 这个标记就是为它们准备的。
+   *
+   * 注意并行还有另一道门槛：**这一批一个都不需要审批**。所以可写的 `delegate`
+   * （assess 为 confirm）不会走到并行分支——不用在这里为它开特例。
+   */
+  parallelSafe?: boolean;
+  /**
    * 风险评估。**不写 = confirm**（见 `safeAssess` 上的说明），所以只读工具必须
    * 显式写 `assess: safeAssess`。
    *
@@ -405,8 +416,16 @@ export type WireEvent =
       note?: string;
       ts: number;
     }
-  | { type: 'subagent.start'; task: string; tools: string[]; ts: number }
-  | { type: 'subagent.end'; result: string; toolsUsed: string[]; steps: number; ts: number }
+  | { type: 'subagent.start'; task: string; tools: string[]; write?: boolean; ts: number }
+  | {
+      type: 'subagent.end';
+      result: string;
+      toolsUsed: string[];
+      steps: number;
+      /** 可写子 agent 改过的文件（相对/绝对路径按工具返回的原样） */
+      changed?: string[];
+      ts: number;
+    }
   | { type: 'memory.distilled'; atoms: { kind: string; text: string }[]; total: number; ts: number }
   | {
       type: 'memory.injected';

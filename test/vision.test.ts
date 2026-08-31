@@ -52,7 +52,8 @@ test('审批放行后能读到工作区外的文件', async () => {
   const read = tools(ws).get('read_file')!;
   const r = await read.run({ path: path.join(outside, 'outside.txt') });
   assert.equal(r.ok, true);
-  assert.equal(r.content, 'outside\n');
+  // 现在带行号返回（让 edit_file 有的放矢），所以断言的是"内容在里面"
+  assert.match(r.content, /outside/);
   fs.rmSync(outside, { recursive: true, force: true });
 });
 

@@ -89,7 +89,7 @@ export interface LoopOptions {
   maxVerifyRounds?: number;
   /**
    * 一次返回多个只读工具调用时同时跑。默认开（`GB_PARALLEL=0` 关，做对照组）。
-   * 只对「全是 cacheable 且都不需要审批」的批次生效，见 runTurn 里的判定。
+   * 只对「全是 cacheable 或 parallelSafe、且都不需要审批」的批次生效，见 runTurn 里的判定。
    */
   parallelReads?: boolean;
 }
@@ -329,7 +329,9 @@ export class Loop {
           calls.length > 1 &&
           calls.every((c, i) => {
             const t = this.tools.get(c.name);
-            if (!t?.cacheable) return false;
+            // cacheable 自带"只读且顺序无关"；parallelSafe 给那些有副作用但彼此独立的
+            // 工具（delegate 派出去的子 agent）用
+            if (!t || !(t.cacheable || t.parallelSafe)) return false;
             const level = t.assess?.(c.args)?.level;
             return (!level || level === 'safe') && sigs[i] !== lastFailedSig;
           });

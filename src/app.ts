@@ -576,7 +576,7 @@ export function buildApp(opts: {
               ),
             ]
           : []),
-        subagentPlugin(workspace, llm),
+        subagentPlugin(workspace, llm, approver),
       ],
       { tools, wire, workspace },
     );

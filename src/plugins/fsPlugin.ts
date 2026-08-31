@@ -96,11 +96,85 @@ function diffPreview(oldText: string, newText: string): string {
   return [...rm, ...add].join('\n');
 }
 
+/** old 在 content 里出现几次（按字面，不走正则） */
+function countOccurrences(content: string, old: string): number {
+  if (old === '') return 0;
+  let n = 0;
+  let i = content.indexOf(old);
+  while (i >= 0) {
+    n += 1;
+    i = content.indexOf(old, i + old.length);
+  }
+  return n;
+}
+
 /** 行太多就头尾各留一半，中间说明省了多少 */
 function clipLines(lines: string[], max: number): string[] {
   if (lines.length <= max) return lines;
   const head = Math.floor(max / 2);
   return [...lines.slice(0, head), `  … 省略 ${lines.length - max} 行 …`, ...lines.slice(-(max - head))];
+}
+
+/**
+ * 一次 read_file 最多返回多少行。
+ *
+ * 为什么要有上限：以前 `read_file` 无条件返回整篇。两千行的文件一次就能把上下文预算
+ * 吃掉一大块，而模型往往只需要其中一个函数；更糟的是**它无从知道该分段**——
+ * 工具没有 offset/limit，也没有任何"还有多少没读"的提示，只能整篇要或者不要。
+ * 给上限 + 给参数 + 在截断处告诉它怎么读下一段，三件事必须一起做才有用。
+ */
+const DEFAULT_MAX_LINES = 2000;
+/** 单行字符上限。压缩过的 js/json 常常整个文件就是一行，按行数限根本限不住 */
+const MAX_LINE_CHARS = 2000;
+
+function maxLines(): number {
+  const n = Number(process.env.GB_READ_MAX_LINES?.trim());
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_LINES;
+}
+
+function clampInt(raw: unknown, min: number, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min ? Math.floor(n) : fallback;
+}
+
+/**
+ * 取文件的一个行窗口，带行号。
+ *
+ * 带行号是为了让 `edit_file` 有的放矢，也让"读了第 200-400 行"这件事在对话里可追溯。
+ * `complete` 表示这次是否把整篇都给出去了——`write_file` 的"必须先读过"要靠它判断。
+ */
+export function readWindow(
+  text: string,
+  offsetArg: unknown,
+  limitArg: unknown,
+): { text: string; shown: number; complete: boolean } {
+  const lines = text.split('\n');
+  // 末尾换行会切出一个空串，它不是"一行"
+  if (lines.length > 1 && lines.at(-1) === '') lines.pop();
+
+  const total = lines.length;
+  const offset = Math.min(clampInt(offsetArg, 1, 1), Math.max(total, 1));
+  const limit = clampInt(limitArg, 1, maxLines());
+  const start = offset - 1;
+  const end = Math.min(start + limit, total);
+  const width = String(end).length;
+
+  const body = lines.slice(start, end).map((l, i) => {
+    const no = String(start + i + 1).padStart(width);
+    const clipped = l.length > MAX_LINE_CHARS ? `${l.slice(0, MAX_LINE_CHARS)}… (本行还有 ${l.length - MAX_LINE_CHARS} 字符)` : l;
+    return `${no}→${clipped}`;
+  });
+
+  const complete = start === 0 && end === total;
+  if (complete) return { text: body.join('\n'), shown: total, complete };
+
+  // 截断时必须明说：省了哪一段、共多少行、下一段怎么读。
+  // 只截不说会让模型以为自己看到了全文，然后基于半个文件下判断
+  const note =
+    end < total
+      ? `\n… 只显示了第 ${offset}-${end} 行，共 ${total} 行。继续读：read_file({ path, offset: ${end + 1} })`
+      : `\n… 只显示了第 ${offset}-${end} 行，共 ${total} 行。`;
+  return { text: body.join('\n') + note, shown: end - start, complete };
 }
 
 /**
@@ -184,10 +258,16 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
         // 只读：本回合内重复读同一个文件直接复用。任何写操作会让缓存整体作废，
         // 所以"改完再读一遍确认"仍然会真的重新读盘。
         cacheable: true,
-        description: '读取文件内容；图片（png/jpg/gif/webp）会作为图像交给模型。工作区外需审批',
+        description:
+          '读取文件内容（带行号）；图片（png/jpg/gif/webp）会作为图像交给模型。工作区外需审批。' +
+          `默认最多返回 ${DEFAULT_MAX_LINES} 行，长文件用 offset/limit 分段读`,
         parameters: {
           type: 'object',
-          properties: { path: { type: 'string', description: '文件路径，相对工作区或绝对路径' } },
+          properties: {
+            path: { type: 'string', description: '文件路径，相对工作区或绝对路径' },
+            offset: { type: 'number', description: '从第几行开始读（1 起，默认 1）' },
+            limit: { type: 'number', description: `最多读几行（默认 ${DEFAULT_MAX_LINES}）` },
+          },
           required: ['path'],
         },
         assess(args) {
@@ -242,18 +322,23 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
             };
           }
 
+          let text: string;
           try {
-            const text = fs.readFileSync(abs, 'utf8');
-            // 记下这一刻的版本：后面 write_file 要靠它判断"覆盖是否安全"
-            remember(abs);
-            return {
-              ok: true,
-              content: text,
-              meta: { action: 'read', path: abs, added: countLines(text) },
-            };
+            text = fs.readFileSync(abs, 'utf8');
           } catch (e) {
             return { ok: false, content: `读取失败: ${(e as Error).message}` };
           }
+
+          const win = readWindow(text, args.offset, args.limit);
+          // **只有整篇都读到了才记版本**。write_file 的"必须先读过"是为了防覆盖式写入
+          // 丢内容；如果这次只读了其中一段，把它记成"读过了"就等于允许模型
+          // 拿着三分之一的内容去覆盖整个文件——那道门就白设了
+          if (win.complete) remember(abs);
+          return {
+            ok: true,
+            content: win.text,
+            meta: { action: 'read', path: abs, added: win.shown },
+          };
         },
       };
 
@@ -348,13 +433,19 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
 
       const editFile: Tool = {
         name: 'edit_file',
-        description: '对工作区内文件做精确的 search/replace 编辑（要求 old 在文件中唯一）',
+        description:
+          '对工作区内文件做精确的 search/replace 编辑。默认要求 old 在文件中唯一出现；' +
+          '要把所有出现处一起改（比如改一个变量名），传 all: true',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: '要编辑的文件路径' },
-            old: { type: 'string', description: '要被替换的原文片段，必须在文件中唯一出现' },
+            old: { type: 'string', description: '要被替换的原文片段' },
             new: { type: 'string', description: '替换成的新内容' },
+            all: {
+              type: 'boolean',
+              description: '替换所有出现处（默认 false，即要求 old 唯一，出现多次会被拒绝）',
+            },
           },
           required: ['path', 'old', 'new'],
         },
@@ -364,16 +455,23 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
           const barrier = writeBarrier(p, zone, real);
           if (barrier) return barrier;
           let preview: string | undefined;
+          let hits = 0;
           try {
             const content = fs.readFileSync(abs, 'utf8');
             const oldText = String(args.old ?? '');
-            if (oldText && content.includes(oldText)) preview = diffPreview(oldText, String(args.new ?? ''));
+            if (oldText) {
+              hits = countOccurrences(content, oldText);
+              if (hits > 0) preview = diffPreview(oldText, String(args.new ?? ''));
+            }
           } catch {
             // 读不到就不给预览，run 时会报错
           }
+          // 批量替换要在审批摘要里写清"要动几处"。`all: true` 改 40 处和改 1 处
+          // 风险完全不同，而摘要上如果只写"编辑文件: x.ts"，人是看不出来的
+          const scope = args.all === true ? `批量编辑文件（${hits} 处）: ${p}` : `编辑文件: ${p}`;
           return {
             level: 'confirm',
-            summary: `编辑文件: ${p}`,
+            summary: scope,
             ...(isCriticalPath(workspace, abs) ? criticalNote() : {}),
             ...(preview ? { preview } : {}),
           };
@@ -382,6 +480,7 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
           const p = String(args.path ?? '');
           const oldText = String(args.old ?? '');
           const newText = String(args.new ?? '');
+          const all = args.all === true;
           const { abs, real, zone } = resolveInWorkspace(workspace, p);
           if (writeBarrier(p, zone, real)) {
             return { ok: false, content: `拒绝：${p}（真实路径 ${real}）不在可写范围内` };
@@ -393,12 +492,18 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
           } catch (e) {
             return { ok: false, content: `读取失败: ${(e as Error).message}` };
           }
-          const idx = content.indexOf(oldText);
-          if (idx < 0) return { ok: false, content: '未找到要替换的文本（old 不匹配）' };
-          if (content.indexOf(oldText, idx + oldText.length) >= 0) {
-            return { ok: false, content: 'old 文本在文件中出现多次，请提供更精确的上下文' };
+          const hits = countOccurrences(content, oldText);
+          if (hits === 0) return { ok: false, content: '未找到要替换的文本（old 不匹配）' };
+          if (hits > 1 && !all) {
+            return {
+              ok: false,
+              content: `old 文本在文件中出现 ${hits} 次。请补更多上下文让它唯一，或传 all: true 一起替换`,
+            };
           }
-          const updated = content.slice(0, idx) + newText + content.slice(idx + oldText.length);
+          // 用 split/join 而不是正则：old 是原文片段，里头的 . * ( ) 必须按字面处理
+          const updated = all
+            ? content.split(oldText).join(newText)
+            : content.replace(oldText, () => newText);
           try {
             fs.writeFileSync(abs, updated, 'utf8');
           } catch (e) {
@@ -407,14 +512,15 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
           // edit_file 不需要"先读过"这道门：old 必须原文匹配，本身就是一次内容校验。
           // 但改完的版本要记下来，否则紧接着的 write_file 会把它当成外部改动
           remember(abs);
+          const where = hits > 1 ? `${hits} 处，` : '';
           return {
             ok: true,
-            content: `已编辑 ${p}（-${countLines(oldText)} / +${countLines(newText)} 行）`,
+            content: `已编辑 ${p}（${where}-${countLines(oldText) * hits} / +${countLines(newText) * hits} 行）`,
             meta: {
               action: 'edited',
               path: p,
-              added: countLines(newText),
-              removed: countLines(oldText),
+              added: countLines(newText) * hits,
+              removed: countLines(oldText) * hits,
             },
           };
         },
