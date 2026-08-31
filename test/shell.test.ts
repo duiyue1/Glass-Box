@@ -137,3 +137,29 @@ test('会毁掉工作成果的 git 子命令算 dangerous，普通命令仍是 c
   }
   cleanup();
 });
+
+test('命令碰到的路径也按归属判：凭证 deny、越界与 .git 升 dangerous', async () => {
+  const { ws, tools, call, cleanup } = setup();
+  const assess = (command: string) => tools.get('run_command')!.assess!({ command });
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(ws, '.env'), 'TOKEN=abc\n');
+
+  // 平常的开发命令不该被这套判定连累
+  for (const c of ['echo hello', 'npm test', 'ls src', 'git status', 'cat README.md']) {
+    assert.equal(assess(c).level, 'confirm', c);
+  }
+
+  assert.equal(assess('cat .env').level, 'deny', '凭证换成命令行也不给读');
+  assert.equal(assess('cat ~/.ssh/id_rsa').level, 'deny');
+  assert.equal(assess('cat $HOME/.ssh/id_rsa').level, 'deny', '变量展开不了也要按字面拦');
+  assert.equal(assess('cp /etc/hosts .').level, 'dangerous');
+  assert.equal(assess('cd ../.. && ls').level, 'dangerous');
+  assert.equal(assess('echo x > .git/config').level, 'dangerous');
+
+  // deny 在 run 里还有第二道闸：assess 只是给审批看的
+  const out = await call('run_command', { command: 'cat .env' });
+  assert.equal(out.ok, false);
+  assert.match(out.content, /凭证/);
+  assert.ok(!out.content.includes('TOKEN=abc'), '内容一个字都不能带出来');
+  cleanup();
+});

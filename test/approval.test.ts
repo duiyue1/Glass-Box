@@ -7,6 +7,8 @@ import { Wire } from '../src/engine/wire.ts';
 import { ToolRegistry } from '../src/engine/toolRegistry.ts';
 import { fsPlugin } from '../src/plugins/fsPlugin.ts';
 import { shellPlugin } from '../src/plugins/shellPlugin.ts';
+import { searchPlugin } from '../src/plugins/searchPlugin.ts';
+import { webPlugin } from '../src/plugins/webPlugin.ts';
 import {
   AutoApprover,
   RememberingApprover,
@@ -21,7 +23,7 @@ function setup(): { dir: string; tools: ToolRegistry } {
   const tools = new ToolRegistry();
   const ctx = { tools, wire: new Wire(), workspace: dir };
   fsPlugin({}).setup(ctx);
-  shellPlugin({}).setup(ctx);
+  shellPlugin().setup(ctx);
   return { dir, tools };
 }
 
@@ -117,6 +119,31 @@ test('工具没声明风险等级时按 confirm 处理，不是静默放行', ()
       assert.notEqual(tool.assess, undefined, `${name} 必须声明 assess`);
     }
     assert.equal(tools.get('read_output')!.assess!({}).level, 'safe');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('每个工具都显式声明了 assess——漏一个就等于每次弹审批', () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-appr-all-')));
+  try {
+    const tools = new ToolRegistry();
+    const ctx = { tools, wire: new Wire(), workspace: dir };
+    for (const p of [fsPlugin({}), searchPlugin(), shellPlugin(), webPlugin()]) p.setup(ctx);
+    const missing = tools.list().filter((t) => t.assess === undefined).map((t) => t.name);
+    assert.deepEqual(missing, [], `这些工具没声明 assess: ${missing.join(', ')}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('读工作区内的普通文件是 safe——曾经因为 return undefined 变成了每次弹审批', () => {
+  const { dir, tools } = setup();
+  try {
+    fs.writeFileSync(path.join(dir, 'a.ts'), 'x\n');
+    assert.equal(tools.get('read_file')!.assess!({ path: 'a.ts' }).level, 'safe');
+    // 还不存在的文件同样不该弹审批（读会失败，但那是 run 的事）
+    assert.equal(tools.get('read_file')!.assess!({ path: 'nope.ts' }).level, 'safe');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

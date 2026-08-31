@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.18 是"不带 flag 直接跑 .ts"的最低版本；24 是下一个 LTS。
+        # 两个都跑，是因为这个项目的卖点之一就是"不用构建步骤"，
+        # 一旦某个 Node 版本上类型擦除的行为变了，得马上知道。
+        node: ['22.18', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # 运行时零依赖，装的只有 typescript / @types/node（构建期）
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

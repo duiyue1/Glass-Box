@@ -6,7 +6,13 @@ import { Loop, type Llm } from '../src/engine/loop.ts';
 import type { Msg, LlmResponse, Tool, ToolSpec } from '../src/engine/types.ts';
 import { RealLlm, mapMessages, parseToolArgs, toOpenAiTools } from '../src/llm/realLlm.ts';
 
-const cfg = { baseUrl: 'https://example.test/v1', model: 'm', apiKey: 'k', family: '' };
+const cfg = {
+  baseUrl: 'https://example.test/v1',
+  model: 'm',
+  apiKey: 'k',
+  family: '',
+  contextWindow: 4000,
+};
 
 const readSpec: ToolSpec = {
   name: 'read_file',

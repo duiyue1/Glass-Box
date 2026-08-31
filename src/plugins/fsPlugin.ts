@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Plugin } from '../engine/plugin.ts';
 import type { RiskAssessment, Tool } from '../engine/types.ts';
-import { resolveInWorkspace, type PathZone } from './paths.ts';
+import { safeAssess } from '../engine/types.ts';
+import { isSecret, resolveInWorkspace, type PathZone } from './paths.ts';
 
 /** 图片扩展名 → MIME。只认这几种主流格式，其余当二进制拒读。 */
 const IMAGE_MIME: Record<string, string> = {
@@ -14,27 +15,9 @@ const IMAGE_MIME: Record<string, string> = {
 };
 
 /**
- * 永久黑名单：无论是否审批放行，这些文件一律不读。
- * 审批能挡住“误操作”，挡不住“看起来合理但其实在偷密钥”的请求——
- * 凭证文件必须有一条不经过人类判断的硬边界。
+ * 凭证黑名单已经搬到 `paths.ts`——因为 shell 命令也要用同一份。
+ * `read_file .env` 被拒而 `run_command "cat .env"` 放行，等于这条边界不存在。
  */
-const SECRET_PATTERNS: RegExp[] = [
-  /(^|\/)\.ssh\//,
-  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/,
-  /(^|\/)\.env(\.|$)/,
-  /(^|\/)\.aws\/credentials$/,
-  /(^|\/)\.kube\/config$/,
-  /(^|\/)\.docker\/config\.json$/,
-  /(^|\/)\.npmrc$/,
-  /(^|\/)\.netrc$/,
-  /(^|\/)\.gnupg\//,
-  /\/Library\/Keychains\//,
-  /\.(pem|key|p12|pfx|keystore)$/,
-];
-
-function isSecret(abs: string): boolean {
-  return SECRET_PATTERNS.some((r) => r.test(abs));
-}
 
 /**
  * 关键配置文件：写它们要每次单独确认，答过「始终允许」也不入记忆。
@@ -222,8 +205,10 @@ export function fsPlugin(opts: { readOnly?: boolean } = {}): Plugin {
           if (zone === 'outside') {
             return { level: 'dangerous', summary: `读取工作区外的文件: ${real}`, reason: '越出工作区边界' };
           }
-          // 区内普通读取（含 .git 里的仓库内容）= safe，不打扰人。只保护写，不保护读
-          return undefined;
+          // 区内普通读取（含 .git 里的仓库内容）= safe，不打扰人。只保护写，不保护读。
+          // 这里必须显式返回 safe：`return undefined` 在"安全缺省"下等于 confirm，
+          // 会让每一次读文件都弹一次审批。
+          return safeAssess();
         },
         run(args) {
           const p = String(args.path ?? '');

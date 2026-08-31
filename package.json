@@ -21,6 +21,10 @@
     "replay": "node src/replay.ts"
   },
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.18"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.9.2"
   }
 }

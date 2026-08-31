@@ -234,10 +234,16 @@ export interface Tool {
    */
   cacheable?: boolean;
   /**
-   * 风险评估（可选）。返回 undefined 或 level='safe' 表示无需审批直接执行。
-   * 风险可以依赖参数——比如写工作区内是 confirm，写工作区外是 dangerous。
+   * 风险评估。**不写 = confirm**（见 `safeAssess` 上的说明），所以只读工具必须
+   * 显式写 `assess: safeAssess`。
+   *
+   * 返回值刻意不允许 `undefined`：语义翻转成"安全缺省"之后，`return undefined`
+   * 会被引擎当成 confirm，而写代码的人往往以为它是 safe——`read_file` 就这么把
+   * "区内普通读取"悄悄变成了每次弹审批。让编译器把每条分支都逼出来。
+   *
+   * 风险可以依赖参数——比如写工作区内是 confirm，写 `.git` 是 deny。
    */
-  assess?(args: Record<string, unknown>): RiskAssessment | undefined;
+  assess?(args: Record<string, unknown>): RiskAssessment;
   /** 执行工具。只关心“做事+返回内容”，toolCallId 由引擎负责回填 */
   run(args: Record<string, unknown>): Promise<ToolOutput> | ToolOutput;
 }

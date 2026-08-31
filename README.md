@@ -1,5 +1,10 @@
 # Glass-Box · 可观测、可插拔的迷你 coding agent
 
+[![CI](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml)
+![Node](https://img.shields.io/badge/node-%E2%89%A522.18-brightgreen)
+![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
+![tests](https://img.shields.io/badge/tests-419-brightgreen)
+
 > 一个跑在终端里的迷你 coding agent。它的特别之处不在"又一个 agent"，而在**把 agent 的内部机制装进玻璃盒**——状态机、工具调用、审批、Skills、记忆、上下文压缩，每一刻都看得见。引擎全自写、无黑盒；零凭证即可跑通。
 
 ## 这是什么
@@ -16,7 +21,11 @@
 
 ## 快速开始
 
-要求：**Node ≥ 22.6**（直接运行 `.ts`，无需编译；本项目零第三方依赖）。
+要求：**Node ≥ 22.18**（这个版本起可以不带 flag 直接运行 `.ts`，无需编译）。
+
+**运行时零第三方依赖**；`devDependencies` 只有 `typescript` 和 `@types/node`，纯粹用于 `npm run typecheck`——
+类型检查是构建期的事，不进运行时。`tsconfig` 里开了 `erasableSyntaxOnly`，因为 Node 的类型擦除
+不支持 enum / 参数属性 / namespace，这个开关让 `tsc` 提前拦住它们，而不是等到运行时炸。
 
 ```bash
 cd Glass-Box
@@ -33,9 +42,35 @@ npm run chat
 # 4) Web UI（浏览器里的玻璃盒，仅监听 127.0.0.1）
 npm run web        # 打开 http://127.0.0.1:7777
 
-# 5) 跑测试（零依赖，Node 自带 test runner）
+# 5) 跑测试（零依赖，Node 自带 test runner）+ 类型检查
 npm test
+npm run typecheck
+
+# 6) 在别的目录上跑（工作区就是安全边界的原点，不必 cd 过去）
+node src/index.ts "整理一下这个项目" --workspace ~/some/repo
 ```
+
+### 塞进脚本和流水线
+
+`--json` 让 stdout 变成纯 JSONL：**每行一个 wire 事件**，最后一行是汇总。
+人类可读的日志一律走 stderr，所以管道里是干净的。
+
+```bash
+# 每一步内部动作都能被程序读到（这就是"玻璃盒"的机器可读版本）
+node src/index.ts "跑一下测试" --json | jq -r 'select(.type=="tool.call") | .call.name'
+
+# 最后一行是结果汇总
+node src/index.ts "任务" --json | tail -1 | jq '{ok, replies, journal}'
+```
+
+退出码：
+
+- `0` 全部回合跑完
+- `1` 有回合抛异常（错误原因在 `result.error` 与 stderr）
+- `2` 用法错误（参数不对、`--workspace` 指的目录不存在）
+
+`--json` 同时意味着"被程序调用"：即使挂在 TTY 上也不会停下来等人敲 `y`，
+审批走 `GB_APPROVE` 策略（默认 confirm 放行、dangerous 拒绝，`deny` 永远拦）。
 
 ### 用真实模型
 
@@ -68,6 +103,10 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
 
 多回合可在 `index.ts` / `tui.ts` 用 `;;` 分隔一次喂入：`node src/index.ts "echo a ;; echo b"`。
 
+所有入口都认 **`--workspace <目录>`**（别名 `-C`，跟 `git -C` 一个意思；也可用 `GB_WORKSPACE` 环境变量）。
+工作区是所有安全边界的原点——`inside` / `outside` / `protected` 都相对它来算，会话日志和记忆也存在它的 `.glassbox/` 下。
+目录必须已存在，不会自动创建：让一个打错的路径凭空变成新工作区，等于把边界画到了任何地方。
+
 ## 指令语法（工具）
 
 假模型和真实模型共用同一套工具指令（真实模型通过 `ACTION: <指令>` 触发）：
@@ -77,7 +116,9 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
   **覆盖已存在的文件必须先 `read` 过它**，读过之后又被外部改动同样拒绝——覆盖式写入丢掉的内容找不回来。
   审批时显示 diff，两头没变的行折叠掉
 - `edit <path> ||| <旧文本> ||| <新文本>` — 精确 search/replace 编辑，审批时显示 diff（要求旧文本唯一）
-- `run <命令>` — 执行 shell 命令（confirm；命中危险模式升级 dangerous）。默认前台、超时 120 秒、输出头尾截断。
+- `run <命令>` — 执行 shell 命令。默认前台、超时 120 秒、输出头尾截断。
+  等级：`confirm` 起步；命中危险模式（`rm -rf`、`sudo`、`git reset` 等）升 `dangerous`；
+  **命令里的路径也参与判定**——越出工作区或碰到 `.git` 升 `dangerous`，碰到凭证类文件直接 `deny`。
   原生 tool calling 下可传 `background: true` 放后台跑（dev server、大测试），立刻返回任务号
 - `read_output <任务号>` — 取后台任务的**增量**日志与状态（只回上次读过之后的部分，不占步数）
 - `kill_command <任务号>` — 终止一个还在跑的后台任务（confirm）
@@ -184,10 +225,12 @@ src/
 │   ├── summarize.ts    #   结构化八段摘要（默认关，GB_SUMMARY=1 打开）
 │   ├── toolRegistry.ts #   工具登记处
 │   ├── plugin.ts       #   Plugin 抽象 + loadPlugins
-│   ├── approval.ts     #   分级审批者
+│   ├── approval.ts     #   分级审批者 + 「始终允许」会话记忆
 │   ├── redact.ts       #   图片脱敏（真数据只走模型请求，事件流留占位）
 │   └── tokens.ts       #   token 估算（图片按固定成本折算）
 ├── plugins/            # fs(read/write/edit) / search(glob+grep) / shell / web / subagent
+│   └── paths.ts        #   路径归属判定（realpath）+ 凭证黑名单 + 命令里的路径归属
+├── cli.ts              # 入口共用的参数解析（--workspace / --json）
 ├── mcp/                # MCP 客户端（stdio + JSON-RPC）+ 把外部工具注册进工具表
 ├── net/                # 零依赖联网层：http(超时/字节上限/SSRF) / html→文本 / 搜索后端
 ├── activity/           # 活动轨迹：工具 meta → 创建/修改/执行 清单 + 汇总
@@ -241,6 +284,14 @@ test/                   # 单元测试（node --test）
 - **`.git` 目录一律不可写**（`deny`）。写 `.git/hooks/pre-commit` 等于给下一次 `git commit` 埋一段自动执行的脚本——那是一条绕过所有工具审批的路。
 - **写到工作区外一律不可写**（`deny`，含顺着软链出去的情况）；**写凭证类文件一律拒绝**。
 - **读取工作区外的文件**属于 dangerous，需要你逐次授权；但凭证类文件（`.env` / `.ssh/` / `*.pem` / `.aws/credentials` / Keychain 等）在**黑名单里永久拒绝**，即使误点"允许"也读不到。
+- **shell 命令也按路径判归属**，和文件工具共用同一份判定和同一份凭证名单。
+  否则 `read_file .env` 被拒而 `run_command "cat .env"` 放行，等于这条边界根本不存在。
+  实现是把命令切词、挑出像路径的词（跳过选项和 URL）、再用同一套 realpath 判定：
+  越界或碰 `.git` 升 `dangerous`，凭证直接 `deny`；带 `$` 展开不了的词拿字面比名单，所以
+  `cat $HOME/.ssh/id_rsa` 也拦得住。
+  **这是启发式，不是沙箱**——`$(echo ... | base64 -d)` 这类刻意混淆它拦不住。它的作用是让审批
+  弹窗上的等级对得上命令实际要做的事（以前 `cat ~/.ssh/id_rsa` 和 `echo hello` 同为 `confirm`）；
+  真正的隔离要靠容器或 seccomp。
 - 图片以 base64 发给模型，**真数据只出现在模型请求里**；事件流 / 黑匣子 / Web SSE 中只保留 `[image image/png ~97KB]` 这样的占位描述。
 - 联网工具（`web` / `fetch`）默认需要确认；**内网、本机、云元数据地址（`localhost`、`10.*`、`169.254.*`、`*.internal` 等）在黑名单里永久拒绝**，且每一跳重定向都会重新检查（防 SSRF）。`GB_WEB=0` 可整体断网。
 

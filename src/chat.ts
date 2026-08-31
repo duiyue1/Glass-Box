@@ -6,6 +6,7 @@ import { Renderer } from './tui/renderer.ts';
 import { FileBlobStore } from './engine/blobs.ts';
 import { readEvents } from './engine/journal.ts';
 import { rebuildHistory, rebuildInfo } from './engine/rebuild.ts';
+import { resolveWorkspace } from './cli.ts';
 
 const color = Boolean(process.stdout.isTTY);
 const dim = (s: string) => (color ? `\x1b[2m${s}\x1b[0m` : s);
@@ -110,10 +111,11 @@ const resumeIdx = argv.indexOf('--resume');
 const resumeId = resumeIdx >= 0 ? argv[resumeIdx + 1] : undefined;
 const atSeq = numAfter('--at');
 
-const sdir = sessionsDir(process.cwd());
+const workspace = resolveWorkspace(argv);
+const sdir = sessionsDir(workspace);
 let restored: Msg[] | undefined;
 let restoredTurns = 0;
-const buildOpts: Parameters<typeof buildApp>[0] = { workspace: process.cwd(), approver };
+const buildOpts: Parameters<typeof buildApp>[0] = { workspace, approver };
 
 if (resumeId) {
   const records = readEvents(sdir, resumeId, atSeq);
@@ -122,7 +124,7 @@ if (resumeId) {
     process.exit(1);
   }
   const info = rebuildInfo(records);
-  restored = rebuildHistory(records, new FileBlobStore(blobsDir(process.cwd())));
+  restored = rebuildHistory(records, new FileBlobStore(blobsDir(workspace)));
   restoredTurns = info.turns;
   if (atSeq === undefined) buildOpts.resumeSessionId = resumeId;
   else buildOpts.forkedFrom = { sessionId: resumeId, seq: info.atSeq, ts: info.atTs };

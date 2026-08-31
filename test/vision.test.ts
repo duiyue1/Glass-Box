@@ -39,7 +39,9 @@ function tools(ws: string): ToolRegistry {
 test('工作区内读取是 safe，工作区外读取升级为 dangerous', () => {
   const { ws, outside } = fixture();
   const read = tools(ws).get('read_file')!;
-  assert.equal(read.assess!({ path: 'in.txt' }), undefined);
+  // 断言 level 而不是"返回了 undefined"：安全缺省翻转成 confirm 之后，
+  // undefined 恰好等于"每次读文件都弹审批"，只认哨兵值的断言不会报警
+  assert.equal(read.assess!({ path: 'in.txt' }).level, 'safe');
   const out = read.assess!({ path: path.join(outside, 'outside.txt') });
   assert.equal(out?.level, 'dangerous');
   fs.rmSync(outside, { recursive: true, force: true });

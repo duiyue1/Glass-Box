@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyPathZone, realpathDeep, resolveInWorkspace } from '../src/plugins/paths.ts';
+import { classifyCommandZone, classifyPathZone, commandPaths, isSecret, realpathDeep, resolveInWorkspace } from '../src/plugins/paths.ts';
 
 const ws = '/tmp/glassbox-ws';
 
@@ -98,4 +98,68 @@ test('工作区本身是软链时，其下的普通文件仍是 inside', () => {
     fs.rmSync(linkDir, { recursive: true, force: true });
     fs.rmSync(real, { recursive: true, force: true });
   }
+});
+
+// ── 命令里的路径归属 ────────────────────────────────────────────
+
+test('commandPaths 只挑出像本地路径的词：选项、URL、带变量的都跳过', () => {
+  assert.deepEqual(commandPaths('echo hello'), [], '普通词一个都不算');
+  assert.deepEqual(commandPaths('npm test'), []);
+  assert.deepEqual(commandPaths('grep -rn TODO src/'), ['src/'], '-rn 是选项不是路径');
+  assert.deepEqual(commandPaths('curl https://example.com/a'), [], 'URL 交给 web 工具管');
+  assert.deepEqual(commandPaths('cat $HOME/x'), [], '展开不了就不猜');
+  assert.deepEqual(commandPaths('cat "a b/c.txt"'), ['a b/c.txt'], '引号要剥掉');
+  assert.deepEqual(commandPaths('x;cat /etc/hosts'), ['/etc/hosts'], '贴着分隔符也要切出来');
+  assert.deepEqual(commandPaths('cat .env'), ['.env'], '同目录裸文件名也算');
+  assert.deepEqual(commandPaths('cd ..'), ['..']);
+});
+
+test('classifyCommandZone：区内命令不升级，越界/凭证/.git 各归各类', () => {
+  const dir = tmpWs();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-out-')));
+  try {
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+    const zone = (cmd: string) => classifyCommandZone(dir, cmd);
+
+    for (const c of ['echo hello', 'npm test', 'ls src', 'grep -rn TODO src/', 'git status']) {
+      assert.equal(zone(c), null, c);
+    }
+
+    assert.equal(zone(`cat ${path.join(outside, 'a.txt')}`)?.kind, 'outside');
+    assert.equal(zone('cd ../.. && ls')?.kind, 'outside');
+    assert.equal(zone('echo x > .git/config')?.kind, 'protected');
+    assert.equal(zone('cat .env')?.kind, 'secret');
+    assert.equal(zone('cat ~/.ssh/id_rsa')?.kind, 'secret');
+
+    // 越界比 .git 更严重：两个都碰到时报越界
+    assert.equal(zone(`cp .git/config ${outside}/`)?.kind, 'outside');
+    // 凭证盖过一切
+    assert.equal(zone('cp .env /tmp/')?.kind, 'secret');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('带变量展开不了的词，拿字面比凭证名单——$HOME/.ssh 也拦得住', () => {
+  const dir = tmpWs();
+  try {
+    const hit = classifyCommandZone(dir, 'cat $HOME/.ssh/id_rsa');
+    assert.equal(hit?.kind, 'secret');
+    assert.equal(hit?.matchedBy, 'literal', '要标明是字面命中，别把它当成真实路径写进理由里');
+
+    const resolved = classifyCommandZone(dir, 'cat ~/.ssh/id_rsa');
+    assert.equal(resolved?.matchedBy, 'literal', '~ 展开前字面里就有 .ssh/');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isSecret 判的是真实路径的形状', () => {
+  assert.equal(isSecret('/home/u/.ssh/id_rsa'), true);
+  assert.equal(isSecret('/a/b/deploy.pem'), true);
+  assert.equal(isSecret('/a/.env.local'), true);
+  assert.equal(isSecret('/a/b/README.md'), false);
+  assert.equal(isSecret('/a/b/environment.ts'), false, '不能因为含 env 就误判');
 });

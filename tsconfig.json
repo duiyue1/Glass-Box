@@ -8,8 +8,9 @@
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
+    "erasableSyntaxOnly": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

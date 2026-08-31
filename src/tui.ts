@@ -1,8 +1,9 @@
 import { AutoApprover } from './engine/approval.ts';
 import { buildApp, parseTurns } from './app.ts';
 import { Renderer } from './tui/renderer.ts';
+import { resolveWorkspace } from './cli.ts';
 
-const WORKSPACE = process.cwd();
+const WORKSPACE = resolveWorkspace();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const approveMode = process.env.GB_APPROVE;

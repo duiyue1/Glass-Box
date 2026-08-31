@@ -11,6 +11,7 @@ import { scanSecrets } from './kb/secrets.ts';
 import { collapseSame, lineDiff } from './kb/diff.ts';
 import { backlinksOf, extractLinks, parseSourceRef, verifyBody } from './kb/wiki.ts';
 import { buildTrajectory } from './traceView.ts';
+import { resolveWorkspace } from './cli.ts';
 
 // 安全：只绑定本地回环。这个 agent 能执行命令、读写文件，
 // 绝不能监听 0.0.0.0，否则同网段的人可以通过浏览器在你机器上跑命令。
@@ -45,7 +46,7 @@ const approver: Approver = {
   },
 };
 
-const WORKSPACE = process.cwd();
+const WORKSPACE = resolveWorkspace();
 const app = buildApp({ workspace: WORKSPACE, approver });
 // 把 wire 事件原样推给前端——Web UI 只是事件总线的又一个订阅者，引擎零改动
 app.wire.subscribe((ev) => broadcast(ev));
@@ -387,7 +388,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/wiki/rollback') {
     try {
       const { version } = JSON.parse((await readBody(req)) || '{}') as { version?: number };
-      if (!Number.isInteger(version) || version < 1) return json(res, 400, { error: 'version 必须是正整数' });
+      if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
+        return json(res, 400, { error: 'version 必须是正整数' });
+      }
       const restored = app.wikiRollback(version);
       if (!restored) return json(res, 404, { error: '没有这个版本或版本为空' });
       return json(res, 200, { ok: true, restored });

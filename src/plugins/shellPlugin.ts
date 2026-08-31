@@ -1,6 +1,7 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import type { Plugin } from '../engine/plugin.ts';
 import { safeAssess, type Tool } from '../engine/types.ts';
+import { classifyCommandZone } from './paths.ts';
 // 输出截断复用验证器里那个「头尾都留」的实现：测试框架的失败摘要通常在末尾，
 // 只留开头等于什么都没留。同一个道理对 run_command 一字不差地成立。
 import { clipOutput } from '../verify/verifier.ts';
@@ -205,15 +206,50 @@ export function shellPlugin(): Plugin {
         assess(args) {
           const cmd = String(args.command ?? '');
           const where = args.background ? '（后台）' : '';
-          const hit = DANGER_PATTERNS.find((d) => d.re.test(cmd));
-          if (hit) {
-            return { level: 'dangerous', summary: `执行命令${where}: ${cmd}`, reason: hit.why };
+          const summary = `执行命令${where}: ${cmd}`;
+
+          // 先判命令碰到的路径。文件工具早就按真实路径判归属了，但 run_command
+          // 以前只看命令长什么样——`cat ~/.ssh/id_rsa` 和 `echo hello` 同为 confirm，
+          // 等于 read_file/write_file 那边所有硬边界换个入口就全部失效
+          const zone = classifyCommandZone(workspace, cmd);
+          if (zone?.kind === 'secret') {
+            const how =
+              zone.matchedBy === 'literal'
+                ? `命令里的 ${zone.path} 字面就命中了凭证名单（带变量，展开不了但也不放行）`
+                : `命令里的 ${zone.path} 真实路径是 ${zone.real}，命中凭证黑名单`;
+            return { level: 'deny', summary, reason: `${how}——换成命令行也一样不给碰` };
           }
-          return { level: 'confirm', summary: `执行命令${where}: ${cmd}` };
+
+          const hit = DANGER_PATTERNS.find((d) => d.re.test(cmd));
+          if (hit) return { level: 'dangerous', summary, reason: hit.why };
+
+          if (zone?.kind === 'outside') {
+            return {
+              level: 'dangerous',
+              summary,
+              reason: `命令里的 ${zone.path} 落在工作区之外（真实路径 ${zone.real}）`,
+            };
+          }
+          if (zone?.kind === 'protected') {
+            return {
+              level: 'dangerous',
+              summary,
+              reason: `命令碰到 git 元数据 ${zone.path}——文件工具那边写 .git 是直接拒绝的`,
+            };
+          }
+          return { level: 'confirm', summary };
         },
         run(args) {
           const cmd = String(args.command ?? '');
           if (!cmd.trim()) return { ok: false, content: 'run_command 需要 command' };
+
+          // 在 run 里再挡一次凭证。assess 只是给审批看的，真正的闸门不能只有一道；
+          // read_file 也是同样的双重拦截
+          const zone = classifyCommandZone(workspace, cmd);
+          if (zone?.kind === 'secret') {
+            const what = zone.matchedBy === 'literal' ? zone.path : `${zone.path}（真实路径 ${zone.real}）`;
+            return { ok: false, content: `拒绝执行：命令里的 ${what} 属于凭证类文件，永不放行` };
+          }
 
           if (args.background) {
             const timeoutMs = clampTimeout(

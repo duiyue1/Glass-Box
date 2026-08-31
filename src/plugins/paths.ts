@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -146,6 +147,34 @@ export function classifyPathZone(workspace: string, p: string): PathZone {
 }
 
 /**
+ * 永久黑名单：无论是否审批放行，这些文件一律不读不写。
+ * 审批能挡住"误操作"，挡不住"看起来合理但其实在偷密钥"的请求——
+ * 凭证文件必须有一条不经过人类判断的硬边界。
+ *
+ * 放在这里而不是 fsPlugin 里，是因为 shell 命令也要用同一份名单：
+ * `read_file .env` 被拒而 `run_command "cat .env"` 放行，等于这条边界不存在。
+ * 一份名单，两个入口共用。
+ */
+const SECRET_PATTERNS: RegExp[] = [
+  /(^|\/)\.ssh\//,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/,
+  /(^|\/)\.env(\.|$)/,
+  /(^|\/)\.aws\/credentials$/,
+  /(^|\/)\.kube\/config$/,
+  /(^|\/)\.docker\/config\.json$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.gnupg\//,
+  /\/Library\/Keychains\//,
+  /\.(pem|key|p12|pfx|keystore)$/,
+];
+
+/** 传**真实路径**（realpath 后），不要传词法路径——软链名字随便起就绕过了 */
+export function isSecret(real: string): boolean {
+  return SECRET_PATTERNS.some((r) => r.test(real));
+}
+
+/**
  * 把用户给的路径解析成绝对路径，并判断它落在哪个区。
  *
  * - `abs`：**词法**解析的绝对路径。实际读写与显示都用它——保持软链语义（写软链就是写它的目标），
@@ -160,4 +189,134 @@ export function resolveInWorkspace(
   const abs = path.resolve(workspace, p);
   const zone = classifyPathZone(workspace, p);
   return { abs, real: realpathDeep(abs), inside: zone === 'inside', zone };
+}
+
+// ── shell 命令的路径归属 ────────────────────────────────────────────
+
+/**
+ * 命令行里被 shell 用来分隔/重定向的字符，切词时当成断点。
+ * `cat <a.txt >b.txt` / `x;cat /etc/hosts` 里的路径不能因为贴着符号就漏掉。
+ */
+const SHELL_SEPARATORS = /[|;&<>()]/;
+/** 协议前缀（URL 不是本地路径，交给 web 工具去管） */
+const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * 这个词值得拿去做路径判定吗？
+ *
+ * 判据：不是选项、不是 URL、不带无法展开的元字符，并且**看起来指向某个文件**——
+ * 带 `/`、`~` 开头、就是 `..`、或者含 `.`（`.env` / `x.ts` 这种同目录下的裸文件名）。
+ *
+ * 为什么裸文件名也要收：`cat .env` 里的 `.env` 一个斜杠都没有，
+ * 但它正是最该拦的那一类。含 `.` 这个判据让 `npm` / `test` / `hello` 这些普通词落选，
+ * 而它们即使落选也无所谓——落在区内本来就不升级。
+ */
+function looksLikePath(token: string): boolean {
+  if (token === '' || token.startsWith('-')) return false; // 选项不是路径
+  if (SCHEME.test(token)) return false;
+  if (token.includes('$') || token.includes('*') || token.includes('?')) return false; // 展开不了，别猜
+  return (
+    token.startsWith('/') ||
+    token.startsWith('~') ||
+    token === '..' ||
+    token.includes('/') ||
+    token.includes('.')
+  );
+}
+
+/** 切词：认引号，所以带空格的路径不会被劈成两半 */
+function tokenize(command: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  const push = (): void => {
+    if (cur !== '') out.push(cur);
+    cur = '';
+  };
+  for (const ch of command) {
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    // 空白和 shell 的分隔/重定向符号都断词：`x;cat /etc/hosts`、`cat <a >b` 都要切开
+    if (/\s/.test(ch) || SHELL_SEPARATORS.test(ch)) push();
+    else cur += ch;
+  }
+  push();
+  return out;
+}
+
+/** 抽出命令里所有值得判定的本地路径，`~` 已展开 */
+export function commandPaths(command: string): string[] {
+  const home = os.homedir();
+  const out: string[] = [];
+  for (const t of tokenize(command)) {
+    if (!looksLikePath(t)) continue;
+    out.push(t === '~' || t.startsWith('~/') ? path.join(home, t.slice(1)) : t);
+  }
+  return out;
+}
+
+/**
+ * shell 命令碰到了什么区。
+ *
+ * 为什么需要这个（这是安全模型上的一个真窟窿）：文件工具已经按真实路径判归属了，
+ * 但 `run_command` 只看命令**长什么样**——于是 `cat ~/.ssh/id_rsa`、`cp /etc/hosts .`、
+ * `cd ../.. && ls` 和 `echo hello` 是同一个风险等级 `confirm`。
+ * 也就是说 `read_file` 那边所有的硬边界，换成 `run_command` 就全部失效。
+ *
+ * 返回最严重的那一档：`secret` > `outside` > `protected` > `null`（没碰到可疑路径）。
+ *
+ * **这是启发式，不是沙箱。** 它按空白切词、认出路径形状的词，再用同一套 realpath 判定去判；
+ * 带 `$` / `*` 的词展开不了，所以不做路径解析，只拿字面去比凭证名单
+ * （`cat $HOME/.ssh/id_rsa` 因此还是能拦住）。但 `$(echo LnNzaA== | base64 -d)`
+ * 这类刻意混淆它拦不住。
+ * 它的作用是把"一眼就该拦的命令"从 confirm 抬到 dangerous/deny，让审批弹窗上的等级
+ * 对得上命令实际要做的事；真正的隔离要靠容器或 seccomp。
+ */
+export interface CommandZoneHit {
+  kind: 'secret' | 'outside' | 'protected';
+  /** 命令里原样的那个词 */
+  path: string;
+  /** realpath 解析后的真身；`literal` 命中时没解析过，等于 path */
+  real: string;
+  /**
+   * 怎么命中的：`realpath` = 解析后判定；`literal` = 词里带 `$`/`*` 解析不了，
+   * 拿字面比中了凭证名单。给审批弹窗写理由时要分开说，别把字面当成真实路径。
+   */
+  matchedBy: 'realpath' | 'literal';
+}
+
+export function classifyCommandZone(workspace: string, command: string): CommandZoneHit | null {
+  const rootReal = canonicalRoot(workspace);
+  let weaker: CommandZoneHit | null = null;
+
+  // 第一轮：所有词的**字面**都比一遍凭证名单。这样 `$HOME/.ssh/id_rsa`、
+  // `"$PWD/../.ssh/id_rsa"` 这些解析不了的写法也拦得住
+  for (const t of tokenize(command)) {
+    if (t.startsWith('-') || SCHEME.test(t)) continue;
+    const literal = t.replace(/\\/g, '/');
+    if (isSecret(literal)) return { kind: 'secret', path: t, real: t, matchedBy: 'literal' };
+  }
+
+  for (const p of commandPaths(command)) {
+    const real = realpathDeep(path.resolve(rootReal, p));
+    // 凭证最严重，一命中就短路
+    if (isSecret(real)) return { kind: 'secret', path: p, real, matchedBy: 'realpath' };
+
+    const zone = classifyRooted(rootReal, p);
+    if (zone === 'inside') continue;
+    // outside 比 protected 严重：前者整个越出了边界，后者还在区内
+    if (zone === 'outside' && weaker?.kind !== 'outside') {
+      weaker = { kind: 'outside', path: p, real, matchedBy: 'realpath' };
+    } else if (zone === 'protected' && weaker === null) {
+      weaker = { kind: 'protected', path: p, real, matchedBy: 'realpath' };
+    }
+  }
+  return weaker;
 }
