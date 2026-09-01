@@ -7,6 +7,23 @@ import { classifyCommandZone, classifyPathZone, commandPaths, isSecret, realpath
 
 const ws = '/tmp/glassbox-ws';
 
+/**
+ * Windows 上建符号链接需要开发者模式/管理员权限，没开就 EPERM。
+ * 这些测试验证的是 realpath 判定本身，跳过不等于放行：
+ * classifyPathZone 在 Windows 上照样走同一条代码路径，只是软链造不出来而已。
+ */
+const canSymlink = (() => {
+  try {
+    const probe = path.join(os.tmpdir(), `gb-symprobe-${process.pid}`);
+    fs.symlinkSync('.', probe);
+    fs.rmSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const symlinkTest = canSymlink ? test : test.skip;
+
 function tmpWs(): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-zone-')));
 }
@@ -32,7 +49,7 @@ test('realpathDeep：文件还不存在时，解析最深的已存在祖先再�
   }
 });
 
-test('软链指向工作区外 → zone=outside（纯字面判断会误判成 inside）', () => {
+symlinkTest('软链指向工作区外 → zone=outside（纯字面判断会误判成 inside）', () => {
   const dir = tmpWs();
   const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-out-')));
   try {
@@ -51,7 +68,7 @@ test('软链指向工作区外 → zone=outside（纯字面判断会误判成 in
   }
 });
 
-test('目录软链出去后，其下的子路径同样算 outside', () => {
+symlinkTest('目录软链出去后，其下的子路径同样算 outside', () => {
   const dir = tmpWs();
   const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-out-')));
   try {
@@ -63,7 +80,7 @@ test('目录软链出去后，其下的子路径同样算 outside', () => {
   }
 });
 
-test('悬空软链按它指向的目标判断，不因为读不到就当 inside', () => {
+symlinkTest('悬空软链按它指向的目标判断，不因为读不到就当 inside', () => {
   const dir = tmpWs();
   try {
     fs.symlinkSync('/tmp/gb-does-not-exist-xyz/a.txt', path.join(dir, 'dangling'));
@@ -88,7 +105,7 @@ test('.git 下的路径是独立的 protected 区，不与 inside 混同', () =>
   }
 });
 
-test('工作区本身是软链时，其下的普通文件仍是 inside', () => {
+symlinkTest('工作区本身是软链时，其下的普通文件仍是 inside', () => {
   const real = tmpWs();
   const linkDir = path.join(os.tmpdir(), `gb-link-${process.pid}-${Date.now()}`);
   try {

@@ -18,6 +18,23 @@ import {
 import type { ApprovalDecision, ApprovalRequest, Approver, WireEvent } from '../src/engine/types.ts';
 import { memorable, toDecision } from '../src/engine/types.ts';
 
+/**
+ * Windows 上建符号链接需要开发者模式/管理员权限，没开就 EPERM。
+ * 跳过不等于放行：黑名单判定本身不依赖软链，这些用例只是用软链
+ * 把"字面在区内、真身在区外"这个情形构造出来。
+ */
+const canSymlink = (() => {
+  try {
+    const probe = path.join(os.tmpdir(), `gb-symprobe-${process.pid}`);
+    fs.symlinkSync('.', probe);
+    fs.rmSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const symlinkTest = canSymlink ? test : test.skip;
+
 function setup(): { dir: string; tools: ToolRegistry } {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-appr-')));
   const tools = new ToolRegistry();
@@ -50,7 +67,7 @@ test('写 .git 下的文件是 deny，不是 confirm——写 hooks 等于埋一
   }
 });
 
-test('顺着软链写到工作区外是 deny，判断用真实路径', () => {
+symlinkTest('顺着软链写到工作区外是 deny，判断用真实路径', () => {
   const { dir, tools } = setup();
   const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-out-')));
   try {
@@ -65,7 +82,7 @@ test('顺着软链写到工作区外是 deny，判断用真实路径', () => {
   }
 });
 
-test('读凭证类文件按真实路径判断：软链绕不过黑名单', async () => {
+symlinkTest('读凭证类文件按真实路径判断：软链绕不过黑名单', async () => {
   const { dir, tools } = setup();
   const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gb-out-')));
   try {

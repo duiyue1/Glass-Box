@@ -7,14 +7,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # 22.18 是"不带 flag 直接跑 .ts"的最低版本；24 是下一个 LTS。
         # 两个都跑，是因为这个项目的卖点之一就是"不用构建步骤"，
         # 一旦某个 Node 版本上类型擦除的行为变了，得马上知道。
+        # windows 一起跑：shell 工具用 spawn({shell:true}) 不写死 /bin/sh，
+        # 测试里的慢命令全用 node 自己（不依赖 sleep/printf）——跨平台是设计出来的，要 CI 兜着
+        os: [ubuntu-latest, windows-latest]
         node: ['22.18', '24']
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -11,7 +11,16 @@ import { scanSecrets } from './kb/secrets.ts';
 import { collapseSame, lineDiff } from './kb/diff.ts';
 import { backlinksOf, extractLinks, parseSourceRef, verifyBody } from './kb/wiki.ts';
 import { buildTrajectory } from './traceView.ts';
-import { resolveWorkspace } from './cli.ts';
+import { hasFlag, resolveWorkspace } from './cli.ts';
+import {
+  applyPatch,
+  changedFiles,
+  createSandbox,
+  patchStat,
+  removeSandbox,
+  sandboxPatch,
+  type Sandbox,
+} from './engine/sandbox.ts';
 
 // 安全：只绑定本地回环。这个 agent 能执行命令、读写文件，
 // 绝不能监听 0.0.0.0，否则同网段的人可以通过浏览器在你机器上跑命令。
@@ -46,7 +55,21 @@ const approver: Approver = {
   },
 };
 
-const WORKSPACE = resolveWorkspace();
+// --sandbox：Web 会话跑在一份 git worktree 副本里。审批改的是副本（真要把
+// 改动留下还得过 /sandbox/apply 这一关），所以风险面天然小一层
+const wantSandbox = hasFlag(process.argv.slice(2), '--sandbox');
+let sandbox: Sandbox | undefined;
+if (wantSandbox) {
+  try {
+    sandbox = createSandbox(resolveWorkspace());
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+  console.error(`[Glass-Box] 隔离副本: ${sandbox.dir}`);
+  console.error(`[Glass-Box] 分支 ${sandbox.branch}（从 HEAD 出发，你未提交的改动不在里面）`);
+}
+const WORKSPACE = sandbox?.dir ?? resolveWorkspace();
 const app = buildApp({ workspace: WORKSPACE, approver });
 // 把 wire 事件原样推给前端——Web UI 只是事件总线的又一个订阅者，引擎零改动
 app.wire.subscribe((ev) => broadcast(ev));
@@ -175,6 +198,45 @@ const server = http.createServer(async (req, res) => {
     turnAbort.abort();
     broadcast({ type: 'web.notice', text: '已请求中断本回合（正在执行的那一步工具会跑完）', ts: Date.now() });
     return json(res, 200, { ok: true });
+  }
+
+  // ── 隔离副本（--sandbox 启动时才有）──────────────────────────
+  if (url.pathname.startsWith('/sandbox/')) {
+    if (!sandbox) return json(res, 404, { error: '服务不是用 --sandbox 启动的' });
+    if (url.pathname === '/sandbox/status' && req.method === 'GET') {
+      return json(res, 200, {
+        dir: sandbox.dir,
+        branch: sandbox.branch,
+        changed: changedFiles(sandbox),
+        stat: patchStat(sandbox),
+      });
+    }
+    if (url.pathname === '/sandbox/patch' && req.method === 'GET') {
+      const changed = changedFiles(sandbox);
+      if (!changed.length) return json(res, 200, { changed: [], patch: '' });
+      return json(res, 200, { changed, patch: sandboxPatch(sandbox) });
+    }
+    if (url.pathname === '/sandbox/apply' && req.method === 'POST') {
+      // 每次都取当下这份补丁：副本里的会话可能还在往上叠改动
+      const changed = changedFiles(sandbox);
+      if (!changed.length) return json(res, 409, { error: '副本里没有改动' });
+      const r = applyPatch(sandbox, sandboxPatch(sandbox));
+      if (!r.ok) return json(res, 409, { error: r.error });
+      broadcast({
+        type: 'web.notice',
+        text: `已合入 ${changed.length} 个文件到工作树（没有提交）。不满意 git checkout -- .`,
+        ts: Date.now(),
+      });
+      return json(res, 200, { ok: true, applied: changed.length });
+    }
+    if (url.pathname === '/sandbox/drop' && req.method === 'POST') {
+      if (busy) return json(res, 409, { error: '回合还在跑，先停掉它' });
+      removeSandbox(sandbox);
+      broadcast({ type: 'web.notice', text: '隔离副本已丢弃，连同其中的会话日志', ts: Date.now() });
+      sandbox = undefined;
+      return json(res, 200, { ok: true });
+    }
+    return json(res, 404, { error: 'unknown sandbox endpoint' });
   }
 
   // ── 资料库 ────────────────────────────────────────────────

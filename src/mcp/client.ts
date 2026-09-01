@@ -188,9 +188,62 @@ export type Coercions = Record<string, true>;
  * 而 ToolSchema 同时被 FakeLlm 的指令语法和 token 估算用着。降级是有损的，
  * 所以宁可如实告诉模型"这里要塞一段 JSON"，也不假装支持。
  */
+/**
+ * 把一个嵌套的 JSON Schema 片段压成一行紧凑的示意，塞进参数 description 里。
+ * 只取形状（type / required / enum / items / 嵌套 properties），截断到有限深度——
+ * 目的是让模型知道"要传什么形状的 JSON"，不是完整复刻 schema。
+ */
+function shapeOf(node: unknown, depth = 0): string {
+  if (node === null || typeof node !== 'object') return '';
+  if (depth > 3) return '…';
+  const n = node as {
+    type?: unknown;
+    items?: unknown;
+    properties?: Record<string, unknown>;
+    required?: unknown;
+    enum?: unknown;
+  };
+  const req = new Set(Array.isArray(n.required) ? (n.required as unknown[]) : []);
+  const inner = Object.entries(n.properties ?? {})
+    .map(([k, v]) => {
+      const sub = shapeOf(v, depth + 1);
+      return `${k}${req.has(k) ? '' : '?'}: ${sub}`;
+    })
+    .join(', ');
+  // 标量名（string/number/...）；联合类型取第一个非 null 的
+  const t = Array.isArray(n.type) ? (n.type as unknown[]).find((x) => x !== 'null') : n.type;
+  const base = typeof t === 'string' ? t : '';
+  if (n.properties) return `{ ${inner} }`;
+  if (n.items !== undefined) return `${base || 'any'}[]（每项是 ${shapeOf(n.items, depth + 1)}）`;
+  if (Array.isArray(n.enum) && n.enum.every((v) => typeof v === 'string')) {
+    return `${base}（${(n.enum as string[]).join('|')}）`;
+  }
+  return base || (inner ? `{ ${inner} }` : 'any');
+}
+
+/**
+ * MCP 的 inputSchema → 引擎的扁平 ToolSchema。
+ *
+ * 引擎的 ToolSchema 只认 string/number/boolean 三种标量（它同时被 FakeLlm 的
+ * 指令语法和 token 估算用着），而 MCP 服务器给的 schema 常有嵌套 object 和 array。
+ *
+ * 降级是有损的，所以**必须把丢掉的东西写在 description 里**：不写的话模型看到的
+ * 签名和服务器实际要的对不上——比如某个参数其实要 `{"query": string, "limit": number}`，
+ * 模型却以为传个字符串就行，调用失败得一头雾水，它还会反复重试同一个错法。
+ * 写清"请传 JSON：{ query: string, limit?: number }"，模型一次就能给对。
+ *
+ * 传回来的 JSON 字符串由 `restoreArgs` 在调用前解析回结构。
+ */
 export function toToolSchema(input: unknown): { schema: ToolSchema; coerce: Coercions } {
   const src = input as {
-    properties?: Record<string, { type?: unknown; description?: string; enum?: unknown }>;
+    properties?: Record<string, {
+      type?: unknown;
+      description?: string;
+      enum?: unknown;
+      items?: unknown;
+      properties?: Record<string, unknown>;
+      required?: unknown;
+    }>;
     required?: unknown;
   };
   const properties: ToolSchema['properties'] = {};
@@ -200,17 +253,25 @@ export function toToolSchema(input: unknown): { schema: ToolSchema; coerce: Coer
     const declared = Array.isArray(raw?.type)
       ? (raw.type as unknown[]).find((t) => t !== 'null')
       : raw?.type;
+    const nested = raw?.properties !== undefined;
+    const isList = raw?.items !== undefined;
+    // 扁平 schema 装不下的（嵌套对象、数组、未知类型）都降级成 string，
+    // 由模型传 JSON 字符串、restoreArgs 解析回来
+    const fits = declared === 'number' || declared === 'integer' || declared === 'boolean' || declared === 'string';
+    const degraded = !fits || nested || isList;
     const kind =
-      declared === 'number' || declared === 'integer'
-        ? 'number'
-        : declared === 'boolean'
-          ? 'boolean'
-          : 'string';
-    const degraded = kind === 'string' && declared !== 'string' && declared !== undefined;
+      fits && !nested && !isList
+        ? declared === 'number' || declared === 'integer'
+          ? 'number'
+          : (declared as 'string' | 'boolean')
+        : 'string';
     if (degraded) coerce[key] = true;
-    const note = degraded ? `（原类型 ${JSON.stringify(declared)}，请传 JSON 字符串）` : '';
-    const description = `${raw?.description ?? ''}${note}`.trim();
-    const values = Array.isArray(raw?.enum) ? raw.enum.filter((v) => typeof v === 'string') : [];
+    const notes: string[] = [];
+    if (isList) notes.push(`数组参数，请传 JSON 字符串（每项是 ${shapeOf(raw?.items) || 'any'}）`);
+    else if (nested) notes.push(`对象参数，请传 JSON 字符串，形如 { ${shapeOf(raw)} }`);
+    else if (degraded) notes.push(`原类型 ${JSON.stringify(declared) ?? '未知'}，请传 JSON 字符串`);
+    const description = [raw?.description ?? '', ...notes].filter(Boolean).join('。').trim();
+    const values = !degraded && Array.isArray(raw?.enum) ? raw.enum.filter((v) => typeof v === 'string') : [];
     properties[key] = {
       type: kind,
       ...(description ? { description } : {}),

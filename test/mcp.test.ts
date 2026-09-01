@@ -218,6 +218,43 @@ test('schema 转换：标量直传，其他类型降级并记下要还原', () =
   assert.deepEqual(schema.required, ['name', 'items'], '声明里不存在的必填项要丢掉');
 });
 
+test('降级是有损的，所以丢掉的结构必须写进 description——模型看到的签名得和服务器要的对得上', () => {
+  const { schema, coerce } = toToolSchema({
+    type: 'object',
+    properties: {
+      filter: {
+        type: 'object',
+        description: '过滤条件',
+        properties: { query: { type: 'string' }, limit: { type: 'number' } },
+        required: ['query'],
+      },
+      tags: { type: 'array', items: { type: 'string' } },
+      nested: {
+        type: 'object',
+        properties: { a: { type: 'object', properties: { b: { type: 'string' } } } },
+      },
+    },
+  });
+
+  const filter = schema.properties.filter!;
+  assert.equal(filter.type, 'string');
+  assert.ok(filter.description, '降级过的参数必须有 description');
+  const desc = filter.description!;
+  assert.match(desc, /过滤条件/, '服务器给的 description 要保住');
+  assert.match(desc, /JSON 字符串/, '要明说是降级成了字符串');
+  // 形状示意里要能看出：哪些字段、什么类型、哪个必填
+  assert.match(desc, /query: string/, '必填不带 ?');
+  assert.match(desc, /limit\?: number/, '可选带 ?');
+
+  assert.match(schema.properties.tags!.description!, /每项是 string/);
+  assert.match(schema.properties.nested!.description!, /a\?: \{ b\?: string \}/, '嵌套也要能示意出来');
+
+  // 描述里示意了 JSON 形状，还得真的能把模型传回来的 JSON 还原
+  assert.deepEqual(coerce, { filter: true, tags: true, nested: true });
+  const back = restoreArgs({ filter: '{"query":"a"}' }, coerce);
+  assert.deepEqual(back.filter, { query: 'a' });
+});
+
 test('还原参数：能解析就解析，解析不了原样传给服务器报错', () => {
   const out = restoreArgs({ a: '[1,2]', b: '不是JSON', c: 3 }, { a: true, b: true });
   assert.deepEqual(out.a, [1, 2]);

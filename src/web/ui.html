@@ -834,6 +834,7 @@
   <div class="composer">
     <textarea id="input" rows="1" placeholder="说点什么…  例如：请在代码库里搜索 StreamGate"></textarea>
     <button class="send ghost" id="newsess" title="开一个空白会话：不带任何上文，记忆里的偏好/禁令仍然生效">+ 新会话</button>
+    <button class="send ghost" id="sandbox" title="隔离副本（--sandbox 启动时才有）：本会话改的文件都在副本上，看改动/合入/丢弃" hidden>沙箱</button>
     <button class="send ghost" id="stop" title="掐掉当前回合：已经做过的步骤留在历史里，可以接着聊" hidden>停止</button>
     <button class="send" id="send">发送</button>
   </div>
@@ -3171,6 +3172,30 @@ function setBusy(b) {
 $('#stop').onclick = async () => {
   const r = await fetch('/abort', { method: 'POST' });
   if (!r.ok) addTrace('bad', '提示', '现在没有回合在跑');
+};
+
+/* ── 隔离副本（服务用 --sandbox 启动时才有）── */
+(async () => {
+  const r = await fetch('/sandbox/status');
+  if (!r.ok) return; // 普通模式，什么都不显示，跟没有这个功能一样
+  $('#sandbox').hidden = false;
+})();
+
+$('#sandbox').onclick = async () => {
+  const s = await (await fetch('/sandbox/status')).json();
+  if (!s.changed.length) {
+    addTrace('info', '沙箱', `副本里还没有任何改动（${s.branch}）`);
+    return;
+  }
+  const p = await (await fetch('/sandbox/patch')).json();
+  const lines = p.patch.split('\n');
+  const head = lines.slice(0, 40).map(l => l.replace(/^/, '  ')).join('\n');
+  const more = lines.length > 40 ? `\n  … 共 ${lines.length} 行，完整 diff 用: git -C ${s.dir} diff --cached HEAD` : '';
+  if (!confirm(`副本改了 ${s.changed.length} 个文件：\n${s.stat}\n\n合入到你的工作树吗？（不产生提交，不满意 git checkout -- . 可回退）\n\n${head}${more}`)) return;
+  const r = await fetch('/sandbox/apply', { method: 'POST' });
+  const j = await r.json();
+  if (!r.ok) { addTrace('bad', '沙箱', j.error); return; }
+  addTrace('ok', '沙箱', `已合入 ${j.applied} 个文件（没有提交）`);
 };
 
 /* ── 输入 ── */

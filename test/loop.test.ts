@@ -41,6 +41,43 @@ test('审批放行时工具执行', async () => {
   assert.ok(events.some((e) => e.type === 'approval.decision' && e.approved === true));
 });
 
+test('本回合注入的上下文排在对话之后——前缀缓存的命门', async () => {
+  // 记下模型实际收到的消息序列
+  const seen: Msg[][] = [];
+  const llm: Llm = {
+    async complete(messages: Msg[]): Promise<LlmResponse> {
+      seen.push(messages.map((m) => ({ ...m })));
+      return { text: 'final' };
+    },
+  };
+  const wire = new Wire();
+  const tools = new ToolRegistry();
+  const loop = new Loop(wire, tools, llm, { decide: async () => true }, {
+    providers: [
+      {
+        name: 'p',
+        provide: () => [{ source: 'p', content: '【资料】这回合的注入', tokensEst: 5 }],
+      },
+    ],
+  });
+  // 两个回合：第二回合像 Session 那样把第一回合的对话传回来
+  const history1 = await loop.runTurn('第一句');
+  await loop.runTurn('第二句', history1);
+
+  // 对话必须整个在前、注入在后：注入内容每回合都在变（技能命中、记忆检索都不同），
+  // 放前面的话第二回合起整个对话前缀就和上一回合不同，缓存全失效
+  for (const req of seen) {
+    const lastConvo = [...req.keys()].reverse().find((i) => req[i]!.role !== 'system');
+    const firstInject = req.findIndex((m) => m.role === 'system' && m.content.includes('【资料】'));
+    assert.ok(firstInject >= 0, '注入内容要在请求里');
+    assert.ok(lastConvo !== undefined && lastConvo < firstInject, '对话在前、注入在后');
+  }
+  // 第二回合的请求必须以完整的第一回合对话开头——这是缓存能命中的前提
+  const second = seen[1]!;
+  assert.equal(second[0]!.content, '第一句', '第二回合要以第一回合的对话开头');
+  assert.equal(second.find((m) => m.content === '第二句') !== undefined, true);
+});
+
 test('审批拒绝时工具不执行，返回被拒结果', async () => {
   const { loop, events } = setup({ decide: async () => false });
   await loop.runTurn('go');

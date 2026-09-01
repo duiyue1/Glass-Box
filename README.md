@@ -3,7 +3,7 @@
 [![CI](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.18-brightgreen)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
-![tests](https://img.shields.io/badge/tests-452-brightgreen)
+![tests](https://img.shields.io/badge/tests-454-brightgreen)
 
 > 一个跑在终端里的迷你 coding agent。它的特别之处不在"又一个 agent"，而在**把 agent 的内部机制装进玻璃盒**——状态机、工具调用、审批、Skills、记忆、上下文压缩，每一刻都看得见。引擎全自写、无黑盒；零凭证即可跑通。
 
@@ -22,7 +22,9 @@
 
 ## 快速开始
 
-要求：**Node ≥ 22.18**（这个版本起可以不带 flag 直接运行 `.ts`，无需编译）。
+要求：**Node ≥ 22.18**（这个版本起可以不带 flag 直接运行 `.ts`，无需编译）。macOS / Linux / Windows 都跑（CI 三平台矩阵）；
+shell 工具用 `spawn({shell:true})` 不写死 `/bin/sh`，测试里的慢命令全用 node 自己当道具，不依赖 `sleep`/`printf`。
+唯一例外：符号链接相关的测试在 Windows 上需要开发者模式（没开就自动跳过，不是失败）。
 
 **运行时零第三方依赖**；`devDependencies` 只有 `typescript` 和 `@types/node`，纯粹用于 `npm run typecheck`——
 类型检查是构建期的事，不进运行时。`tsconfig` 里开了 `erasableSyntaxOnly`，因为 Node 的类型擦除
@@ -80,6 +82,15 @@ node src/index.ts "任务" --sandbox --apply
   它挡的是"改坏你的代码"，不是"越权访问系统"。要那一层还得靠容器或 seccomp。
 
 要求工作区是一个**有过至少一次提交**的 git 仓库，否则明确报错并以退出码 `2` 退出。
+
+四个入口都支持：
+
+```bash
+node src/index.ts "任务" --sandbox          # 一次性：跑完给 diff，--apply 直接合入
+node src/chat.ts --sandbox                  # 交互式：会话中途 /diff 看改动、/apply 合入、/drop 丢弃
+node src/web.ts --sandbox                   # Web：页面上「沙箱」按钮看改动/合入（REST: /sandbox/status|patch|apply|drop）
+node src/tui.ts                             # TUI 是只读回放界面，没有可隔离的东西，不需要这个 flag
+```
 
 ### 塞进脚本和流水线
 
@@ -190,7 +201,9 @@ GB_LLM=fake npm run chat                                    # 强制回退假模
 
 - **默认逐次审批**。MCP 服务器是外部进程，能读文件、能联网，做什么由它自己决定；默认免审批等于把项目所有安全边界一次交出去。确认可信（比如只读的内部文档服务）再加 `"trust": true`。
 - **只做 stdio + tools**，不做 SSE/HTTP，也不做 resources/prompts。
-- **参数有损降级**：MCP 的 `inputSchema` 是完整 JSON Schema，而引擎的工具表只认扁平标量。array/object 参数会声明成字符串并在说明里写「请传 JSON 字符串」，调用前再解析回来——宁可如实告诉模型，也不假装支持。
+- **参数降级是显式的**：MCP 的 `inputSchema` 是完整 JSON Schema，而引擎的工具表只认扁平标量。嵌套 object / array 参数会声明成字符串，
+  但 description 里**写清它原本的形状**（如 `对象参数，请传 JSON 字符串，形如 { query: string, limit?: number }`，必填不带 `?`、可选带），
+  调用前再解析回来。降级本身是有损的——不写的话模型看到的签名和服务器实际要的对不上，它会用同一个错法反复重试。
 - 一台连不上不影响其他台，失败原因和服务器 stderr 会打在启动日志里。`"disabled": true` 临时停用，`GB_MCP=0` 整体关掉。
 
 ## 环境变量
@@ -330,6 +343,10 @@ test/                   # 单元测试（node --test）
 - **读取工作区外的文件**属于 dangerous，需要你逐次授权；但凭证类文件（`.env` / `.ssh/` / `*.pem` / `.aws/credentials` / Keychain 等）在**黑名单里永久拒绝**，即使误点"允许"也读不到。
 - **shell 命令也按路径判归属**，和文件工具共用同一份判定和同一份凭证名单。
   否则 `read_file .env` 被拒而 `run_command "cat .env"` 放行，等于这条边界根本不存在。
+- **上下文拼装按前缀缓存设计**：`[系统提示+工具声明] [对话历史] [本回合注入]`。
+  注入（技能命中、记忆检索、wiki 目录）每回合都在变，排在对话前面的话，
+  从第二回合起整个对话前缀就和上一回合逐字节不同，缓存全部失效——
+  而对话恰恰是最大最值钱的那段。`[计量]` 日志里的 `缓存命中 N` 可以直接验证。
   实现是把命令切词、挑出像路径的词（跳过选项和 URL）、再用同一套 realpath 判定：
   越界或碰 `.git` 升 `dangerous`，凭证直接 `deny`；带 `$` 展开不了的词拿字面比名单，所以
   `cat $HOME/.ssh/id_rsa` 也拦得住。

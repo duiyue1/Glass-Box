@@ -237,7 +237,18 @@ export class Loop {
       // 放在每次发请求之前：工具结果是回合内长出来的，回合开始时压一次不够。
       // specs 一起递进去：摘要要调模型，带上同样的工具声明才能命中前缀缓存
       await this.compactor?.compact(convo, this.budget - fixedTokens, specs);
-      const messages = [...injected, ...convo];
+      /**
+       * 消息顺序是前缀缓存的关键，别随手改。
+       *
+       * `[...convo, ...injected]` —— 对话在前、本回合注入在后。
+       * 看起来"上下文在前"更自然，但那样每回合注入的内容一变（技能命中不同、
+       * 记忆检索到不同条目、wiki 目录更新），整个对话的前缀就和上一回合
+       * 逐字节不同了，缓存全部失效——而对话恰恰是最大最值钱的那段。
+       * 注释放尾部：变的是尾，前面的对话字节保持不变，缓存才能一路命中。
+       * `realLlm` 发请求时在最前面再拼一段系统提示 + 工具声明，
+       * 那段在一个会话里是恒定的，也稳。
+       */
+      const messages = [...convo, ...injected];
       const estimated = fixedTokens + estimateTokens(convo);
       this.wire.emit({
         type: 'context.usage',

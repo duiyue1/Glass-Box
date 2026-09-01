@@ -6,7 +6,16 @@ import { Renderer } from './tui/renderer.ts';
 import { FileBlobStore } from './engine/blobs.ts';
 import { readEvents } from './engine/journal.ts';
 import { rebuildHistory, rebuildInfo } from './engine/rebuild.ts';
-import { resolveWorkspace } from './cli.ts';
+import { hasFlag, resolveWorkspace, stripFlags } from './cli.ts';
+import {
+  applyPatch,
+  changedFiles,
+  createSandbox,
+  patchStat,
+  removeSandbox,
+  sandboxPatch,
+  type Sandbox,
+} from './engine/sandbox.ts';
 
 const color = Boolean(process.stdout.isTTY);
 const dim = (s: string) => (color ? `\x1b[2m${s}\x1b[0m` : s);
@@ -111,7 +120,20 @@ const resumeIdx = argv.indexOf('--resume');
 const resumeId = resumeIdx >= 0 ? argv[resumeIdx + 1] : undefined;
 const atSeq = numAfter('--at');
 
-const workspace = resolveWorkspace(argv);
+// --sandbox：整个会话跑在一份 git worktree 副本里，改了什么随时 /diff 看、
+// 满意了 /apply 打回工作树。交互式会话恰恰是最需要它的形态——一次性任务你
+// 还能盯着 diff，聊着聊着改二十个文件时根本没法逐条审
+const wantSandbox = hasFlag(argv, '--sandbox');
+let sandbox: Sandbox | undefined;
+if (wantSandbox) {
+  try {
+    sandbox = createSandbox(resolveWorkspace(argv));
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+}
+const workspace = sandbox?.dir ?? resolveWorkspace(argv);
 const sdir = sessionsDir(workspace);
 let restored: Msg[] | undefined;
 let restoredTurns = 0;
@@ -216,9 +238,23 @@ if (restored) {
 }
 
 console.log(bold('\nGlass-Box 交互式对话'));
-console.log(dim('输入自然语言与 agent 对话。命令：/new 开新会话 · /panel 看玻璃盒面板 · /help 帮助 · /exit 退出'));
+console.log(
+  dim(
+    '输入自然语言与 agent 对话。命令：/new 开新会话 · /panel 看玻璃盒面板 · /help 帮助 · /exit 退出' +
+      (sandbox ? ' · /diff /apply /drop 管理隔离副本' : ''),
+  ),
+);
 console.log(dim('回合进行中按 Esc（或 Ctrl-C）可中断本回合；空闲时按 Ctrl-C 退出。'));
+if (sandbox) {
+  console.log(dim(`[沙箱] 本会话跑在隔离副本里：${sandbox.dir}`));
+  console.log(dim(`[沙箱] 分支 ${sandbox.branch}（从 HEAD 出发，你未提交的改动不在里面）`));
+  console.log(dim('[沙箱] 会话里改的文件都在副本上；/diff 随时看，/apply 打回工作树，/drop 整个丢弃'));
+}
 console.log(dim(`会话日志: ${app.journal.path}${app.journal.isPending() ? '（说第一句话时才创建）' : ''}`));
+
+// /drop 的出口标记：会话日志还在副本目录里开着，必须先退出循环、关掉 readline，
+// 再删副本——顺序反了 Journal 会往一个已删除的目录里写
+let dropSandboxAndExit = false;
 
 for (;;) {
   const line = await nextLine(bold('\n你> '));
@@ -230,7 +266,56 @@ for (;;) {
     console.log(dim('  /new  开一个空白会话  ·  /panel  显示玻璃盒内部状态面板  ·  /help 帮助  ·  /exit 退出'));
     console.log(dim('  回合跑飞了按 Esc 或 Ctrl-C 中断它（只停这一个回合，历史和会话都留着）。'));
     console.log(dim('  写文件 / 执行命令等有风险的操作会在这里请求你确认。'));
+    if (sandbox) {
+      console.log(dim('  /diff   看隔离副本里 agent 改了哪些文件'));
+      console.log(dim('  /apply  把副本的改动打回你的工作树（不产生提交，不满意 git checkout -- . 可回退）'));
+      console.log(dim('  /drop   整个副本丢弃（连本次会话日志一起，不可恢复）'));
+    }
     continue;
+  }
+  // ── 沙箱三连：会话中途随时看/合/扔 ──────────────────────────────
+  if (sandbox && t === '/diff') {
+    const changed = changedFiles(sandbox);
+    if (changed.length === 0) {
+      console.log(dim('\n[沙箱] 副本里还没有任何改动。'));
+    } else {
+      console.log(bold(`\n[沙箱] 副本里改了 ${changed.length} 个文件：`));
+      console.log(dim(patchStat(sandbox)));
+      console.log(dim(`完整 diff:  git -C ${sandbox.dir} diff --cached HEAD`));
+    }
+    continue;
+  }
+  if (sandbox && t === '/apply') {
+    const changed = changedFiles(sandbox);
+    if (changed.length === 0) {
+      console.log(dim('\n[沙箱] 没有改动可合入。'));
+      continue;
+    }
+    // 副本里的会话可能还在往上叠改动，所以每次都取当下这份补丁
+    const patch = sandboxPatch(sandbox);
+    const r = applyPatch(sandbox, patch);
+    if (r.ok) {
+      console.log(bold(`\n[沙箱] 已合入 ${changed.length} 个文件到你的工作树（只动工作树，没有提交）。`));
+      console.log(dim('  不满意就 git checkout -- . 回退。注意：合入后副本继续有效，后面还能再 /apply 增量。'));
+    } else {
+      console.error(`[沙箱] 补丁没打上：${r.error}`);
+      console.error(dim('  通常是你的工作树在同一处也改了。git -C ' + sandbox.dir + ' diff --cached HEAD 看看原文。'));
+    }
+    continue;
+  }
+  if (sandbox && t === '/drop') {
+    const changed = changedFiles(sandbox);
+    const q = changed.length
+      ? `副本里有 ${changed.length} 个文件的改动没合入，连同本次会话日志一起丢弃？[y/N] `
+      : '丢弃这个副本（本次会话日志会一起没）？[y/N] ';
+    const ans = (await nextLine(dim(`  ${q}`))) ?? '';
+    if (!/^y(es)?$/i.test(ans.trim())) {
+      console.log(dim('  已取消。'));
+      continue;
+    }
+    // 会话日志在副本目录里，先退出循环由 finally 清理，别在 Journal 还开着的时候删目录
+    dropSandboxAndExit = true;
+    break;
   }
   if (t === '/new') {
     const s = app.newSession();
@@ -252,4 +337,18 @@ for (;;) {
 }
 
 rl.close();
+if (sandbox) {
+  if (dropSandboxAndExit) {
+    removeSandbox(sandbox);
+    console.log(dim('\n[沙箱] 副本已丢弃。'));
+  } else if (changedFiles(sandbox).length > 0) {
+    // 正常退出但副本里有未处置的改动：把去路说清楚，别让它变成 worktree 列表里的孤儿
+    console.log(dim(`\n[沙箱] 副本里还有 ${changedFiles(sandbox).length} 个文件的改动没处置。`));
+    console.log(dim(`  看完整 diff: git -C ${sandbox.dir} diff --cached HEAD`));
+    console.log(dim(`  手动合入:    git -C ${sandbox.dir} diff --cached HEAD | git apply --index`));
+    console.log(dim(`  手动丢弃:    git worktree remove --force ${sandbox.dir} && git branch -D ${sandbox.branch}`));
+  } else {
+    removeSandbox(sandbox);
+  }
+}
 console.log(dim('\n再见。'));

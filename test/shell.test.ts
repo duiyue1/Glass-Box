@@ -10,6 +10,21 @@ import { shellPlugin } from '../src/plugins/shellPlugin.ts';
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 一个"要跑一会儿"的命令。测试要验证的是超时/终止/增量读，不是 `sleep` 本身——
+ * 而拿 `sleep` / `printf` 当道具会让整个测试套件在 Windows 原生环境挂掉。
+ * 用 node 自己当慢命令：哪里跑得了测试，哪里就跑得了它。
+ */
+const slow = (seconds: number): string => `node -e "setTimeout(()=>{},${seconds * 1000})"`;
+/** 分段输出：立刻打出第一段，停一下再打第二段（验证增量读）。
+ * 间隔要够大：node --test 下子进程冷启动能到几百毫秒，间隔太小的话
+ * 第二次读之前两段就都落地了，"增量"就没法验证。
+ * 输出串必须是命令原文里没有的：表头会回显整条命令——所以第一段打成
+ * 'AA'+'A' 拼接，命令原文里就搜不到连续的 AAA */
+const twoParts = (first: string, second: string, gapMs = 2500): string =>
+  `node -e "console.log('${first.slice(0, -1)}'+'${first.at(-1)}');` +
+  `setTimeout(()=>console.log('${second.slice(0, -1)}'+'${second.at(-1)}'),${gapMs})"`;;
+
 function setup() {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-shell-'));
   const wire = new Wire();
@@ -21,7 +36,7 @@ function setup() {
 
 test('前台超时可配，超时后明说是超时、并指路后台', async () => {
   const { call, cleanup } = setup();
-  const out = await call('run_command', { command: 'sleep 5', timeoutMs: 1000 });
+  const out = await call('run_command', { command: slow(5), timeoutMs: 1000 });
 
   assert.equal(out.ok, false);
   assert.match(out.content, /上限被终止/, '要说清是超时，不是命令本身失败——否则模型会去改代码');
@@ -44,13 +59,15 @@ test('后台任务立刻返回任务号，read_output 只回增量', async () =>
   // 输出用 AAA/BBB 这种不会出现在命令原文里的串：表头会带命令原文，
   // 拿输出内容当断言目标时不能跟它撞车
   const started = await call('run_command', {
-    command: `printf 'A%s\\n' AA; sleep 0.4; printf 'B%s\\n' BB`,
+    command: twoParts('AAA', 'BBB'),
     background: true,
   });
   assert.equal(started.ok, true);
   assert.match(started.content, /job1/);
 
-  await wait(200);
+  // 先给 node 冷启动留时间再读第一次。直接轮询会出这种竞态：
+  // 程序还没打出 AAA，第一次读就把（空的）增量消费掉了，AAA 永远读不到
+  await wait(1200);
   const first = await call('read_output', { id: 'job1' });
   assert.match(first.content, /AAA/);
   assert.ok(!first.content.includes('BBB'), '还没输出的东西不该出现');
@@ -76,7 +93,7 @@ test('后台任务立刻返回任务号，read_output 只回增量', async () =>
 
 test('kill_command 能停下跑飞的后台任务', async () => {
   const { call, cleanup } = setup();
-  await call('run_command', { command: 'sleep 30', background: true });
+  await call('run_command', { command: slow(30), background: true });
 
   const killed = await call('kill_command', { id: 'job1' });
   assert.equal(killed.ok, true);
