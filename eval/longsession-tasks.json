@@ -1,0 +1,35 @@
+{
+  "name": "多轮长会话：早期约束存活率 v1",
+  "note": "第 1 轮定下两条长期约束，之后 8 轮不断加需求，全程共用一个会话。功能判定和约束判定分开跑：功能全对而约束丢光，正是上下文被压掉的典型症状。配合 GLASSBOX_MODEL_WINDOW 把窗口调小，压缩才会真的发生（真窗口下十轮小改动根本压不到）。",
+  "tasks": [
+    {
+      "id": "L1",
+      "title": "十轮里守住「导出必须有 JSDoc + 不许裸 throw Error」",
+      "dimension": "长会话约束存活",
+      "prompt": "接下来我们要一起把 lib.js 扩起来。先立两条规矩，之后每一轮都要遵守，我不会再重复：\n(1) lib.js 里每一个 export 出去的函数，紧邻它上方必须有 /** ... */ 形式的 JSDoc 注释；\n(2) lib.js 里不许出现裸的 throw new Error(...)，一律 throw new AppError(...)，AppError 已经在 errors.js 里给你了。\n第一件事：给 lib.js 加一个 add(a, b) 返回两数之和，参数不是数字时报错。",
+      "turns": [
+        "再加一个 sub(a, b)，返回 a 减 b，同样的参数检查。",
+        "加一个 mul(a, b)。",
+        "加一个 div(a, b)，除数为 0 要报错。",
+        "加一个 clamp(n, lo, hi)，把 n 夹在 lo 和 hi 之间；lo 比 hi 大的时候要报错。",
+        "加一个 sum(xs)，对数组求和，元素不是数字就报错。",
+        "加一个 avg(xs)，求平均；空数组要报错。",
+        "加一个 median(xs)，求中位数；空数组同样报错。",
+        "最后加一个 describe(xs)，返回 { n, sum, avg, median } 四个字段，复用你前面写的那些函数。"
+      ],
+      "verify": "node --test check.test.js",
+      "constraintVerify": "node constraints.mjs",
+      "frozen": ["errors.js", "package.json"],
+      "timeoutMs": 90000,
+      "files": {
+        "package.json": "{\n  \"name\": \"task-l1\",\n  \"type\": \"module\"\n}\n",
+        "errors.js": "/** 本项目统一的错误类型 */\nexport class AppError extends Error {\n  constructor(message) {\n    super(message);\n    this.name = 'AppError';\n  }\n}\n",
+        "lib.js": "import { AppError } from './errors.js';\n\n// 这里开始往下加。注意上面那两条规矩。\n"
+      },
+      "hidden": {
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport * as lib from './lib.js';\n\ntest('八个函数都在', () => {\n  for (const n of ['add', 'sub', 'mul', 'div', 'clamp', 'sum', 'avg', 'median', 'describe']) {\n    assert.equal(typeof lib[n], 'function', `缺 ${n}`);\n  }\n});\n\ntest('算得对', () => {\n  assert.equal(lib.add(1, 2), 3);\n  assert.equal(lib.sub(5, 2), 3);\n  assert.equal(lib.mul(3, 4), 12);\n  assert.equal(lib.div(9, 3), 3);\n  assert.equal(lib.clamp(5, 1, 3), 3);\n  assert.equal(lib.clamp(0, 1, 3), 1);\n  assert.equal(lib.sum([1, 2, 3]), 6);\n  assert.equal(lib.avg([1, 2, 3]), 2);\n  assert.equal(lib.median([3, 1, 2]), 2);\n  assert.equal(lib.median([4, 1, 3, 2]), 2.5);\n  assert.deepEqual(lib.describe([1, 2, 3]), { n: 3, sum: 6, avg: 2, median: 2 });\n});\n\ntest('错误情况都要抛', () => {\n  for (const f of [() => lib.add('a', 1), () => lib.div(1, 0), () => lib.clamp(1, 3, 1), () => lib.avg([]), () => lib.median([])]) {\n    assert.throws(f);\n  }\n});\n",
+        "constraints.mjs": "// 第 1 轮定下的两条规矩，到最后一轮还守着吗？\nimport fs from 'node:fs';\n\nconst src = fs.readFileSync('lib.js', 'utf8');\nconst lines = src.split('\\n');\nconst problems = [];\n\n// 规矩 1：每个 export function 上方紧邻必须有 JSDoc 收尾行\nlines.forEach((line, i) => {\n  const m = /^\\s*export\\s+(async\\s+)?function\\s+([A-Za-z0-9_$]+)/.exec(line);\n  if (!m) return;\n  let j = i - 1;\n  while (j >= 0 && lines[j].trim() === '') j -= 1;\n  if (j < 0 || !lines[j].trim().endsWith('*/')) problems.push(`export ${m[2]}（第 ${i + 1} 行）上方没有 JSDoc`);\n});\n\n// 规矩 2：不许裸 throw new Error\nlines.forEach((line, i) => {\n  if (/throw\\s+new\\s+Error\\s*\\(/.test(line)) problems.push(`第 ${i + 1} 行有裸的 throw new Error`);\n});\n\nif (problems.length) {\n  console.error('早期约束已被破坏：\\n- ' + problems.join('\\n- '));\n  process.exit(1);\n}\nconsole.log('两条约束都还在');\n"
+      }
+    }
+  ]
+}

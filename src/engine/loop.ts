@@ -12,7 +12,7 @@ import type {
   ToolSpec,
   ContextProvider,
 } from './types.ts';
-import { EMPTY_SCHEMA, toDecision } from './types.ts';
+import { EMPTY_SCHEMA, partialOf, toDecision } from './types.ts';
 import type { Wire } from './wire.ts';
 import type { ToolRegistry } from './toolRegistry.ts';
 import { estimateTokens } from './tokens.ts';
@@ -270,8 +270,9 @@ export class Loop {
           signal,
         );
       } catch (e) {
-        // 中断会让底层 fetch 抛 AbortError。那不是故障，是用户按了停
-        if (signal?.aborted) return this.abortTurn(turnId, convo, steps);
+        // 中断会让底层 fetch 抛 AbortError。那不是故障，是用户按了停。
+        // 错误上可能挂着已经吐给用户的那半句（partialOf），要把它一起写进历史
+        if (signal?.aborted) return this.abortTurn(turnId, convo, steps, partialOf(e));
         throw e;
       }
       this.wire.emit({ type: 'llm.response', turnId, response: resp, ts: Date.now() });
@@ -498,9 +499,13 @@ export class Loop {
   /**
    * 被掐掉：留一句"没做完"，发事件，然后走正常收尾。
    * 不抛异常——中断是用户的正常操作，不该让调用方去 catch，也不该让历史停在半截。
+   *
+   * @param partial 中断前模型已经吐给用户的那半句。有就接在前面——屏幕上出现过的话
+   *   必须留在历史里，否则模型下一轮看不见自己刚说过什么，回放出来的也和当时的屏幕不一样。
    */
-  private abortTurn(turnId: string, convo: Msg[], steps: number): Msg[] {
-    convo.push({ role: 'assistant', content: ABORT_TEXT });
+  private abortTurn(turnId: string, convo: Msg[], steps: number, partial = ''): Msg[] {
+    const said = partial.trim();
+    convo.push({ role: 'assistant', content: said ? `${said}\n${ABORT_TEXT}` : ABORT_TEXT });
     this.wire.emit({ type: 'turn.aborted', turnId, steps, ts: Date.now() });
     return this.finish(turnId, convo);
   }

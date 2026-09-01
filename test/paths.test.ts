@@ -16,7 +16,9 @@ const canSymlink = (() => {
   try {
     const probe = path.join(os.tmpdir(), `gb-symprobe-${process.pid}`);
     fs.symlinkSync('.', probe);
-    fs.rmSync(probe);
+    // 必须用 unlinkSync：rmSync 会顺着软链看到目标是目录，抛 EISDIR，
+    // 于是"能不能建软链"被误判成"不能"——下面这些安全用例就在 macOS/Linux 上全被静默跳过了
+    fs.unlinkSync(probe);
     return true;
   } catch {
     return false;
@@ -125,10 +127,21 @@ test('commandPaths 只挑出像本地路径的词：选项、URL、带变量的�
   assert.deepEqual(commandPaths('grep -rn TODO src/'), ['src/'], '-rn 是选项不是路径');
   assert.deepEqual(commandPaths('curl https://example.com/a'), [], 'URL 交给 web 工具管');
   assert.deepEqual(commandPaths('cat $HOME/x'), [], '展开不了就不猜');
-  assert.deepEqual(commandPaths('cat "a b/c.txt"'), ['a b/c.txt'], '引号要剥掉');
+  // 引号剥掉，整段仍算一个路径（带空格的文件名）；同时按空白切出的碎片也一并进候选，
+  // 否则 `sh -c "cat /etc/passwd"` 整段会被当成工作区内的一个相对路径而不升级
+  assert.deepEqual(commandPaths('cat "a b/c.txt"'), ['a b/c.txt', 'b/c.txt']);
   assert.deepEqual(commandPaths('x;cat /etc/hosts'), ['/etc/hosts'], '贴着分隔符也要切出来');
   assert.deepEqual(commandPaths('cat .env'), ['.env'], '同目录裸文件名也算');
   assert.deepEqual(commandPaths('cd ..'), ['..']);
+});
+
+test('引号包住的嵌套命令里的路径也要挑出来——加个引号不该降一档', () => {
+  // 实测的降级漏洞：`cat /etc/passwd` 判 dangerous，而同一件事写成
+  // `sh -c "cat /etc/passwd"` 只判 confirm，因为引号段是一个词、含 `/`、
+  // 被当成工作区内的相对路径 `<ws>/cat /etc/passwd`
+  assert.ok(commandPaths('sh -c "cat /etc/passwd"').includes('/etc/passwd'));
+  assert.ok(commandPaths("bash -c 'cp ../outside/x .'").includes('../outside/x'));
+  assert.ok(commandPaths('sh -c "cat .git/config"').includes('.git/config'));
 });
 
 test('classifyCommandZone：区内命令不升级，越界/凭证/.git 各归各类', () => {
@@ -153,6 +166,11 @@ test('classifyCommandZone：区内命令不升级，越界/凭证/.git 各归各
     assert.equal(zone(`cp .git/config ${outside}/`)?.kind, 'outside');
     // 凭证盖过一切
     assert.equal(zone('cp .env /tmp/')?.kind, 'secret');
+
+    // 套在引号里的嵌套命令，判定结果必须和不加引号时一致
+    assert.equal(zone(`sh -c "cat ${path.join(outside, 'a.txt')}"`)?.kind, 'outside');
+    assert.equal(zone('sh -c "echo x > .git/config"')?.kind, 'protected');
+    assert.equal(zone("bash -lc 'cat .env'")?.kind, 'secret');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });

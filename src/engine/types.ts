@@ -154,6 +154,23 @@ export function toDecision(d: ApprovalDecision | boolean): ApprovalDecision {
 }
 
 /**
+ * 从一个错误里取出「已经吐给用户的那半句话」。
+ *
+ * 为什么需要这么一个约定：中断和断连时，模型往往已经流出了一段文本——用户在屏幕上看见了，
+ * `llm.delta` 事件里也记着，但如果只往历史里塞一句"（已中断）"，那半句话就从对话历史里
+ * 消失了：模型下一轮看不见自己刚说过的话，从日志重建的历史也和当时的屏幕对不上。
+ * 对一个把"可观测 + 可回放"当卖点的项目来说，这种不一致比丢一段文本更严重。
+ *
+ * 约定用鸭子类型而不是自定义错误类：provider 在错误对象上挂一个 `partial` 字符串就行，
+ * 引擎不需要认识任何具体的 provider（`engine/` 不该 import `llm/`）。
+ */
+export function partialOf(e: unknown): string {
+  if (typeof e !== 'object' || e === null) return '';
+  const p = (e as { partial?: unknown }).partial;
+  return typeof p === 'string' ? p : '';
+}
+
+/**
  * 这次审批能不能进「始终允许」记忆。
  *
  * 两条限制：

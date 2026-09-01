@@ -36,7 +36,12 @@ export class FakeLlm implements Llm {
   readonly contextWindow = 4000;
 
   async complete(messages: Msg[], onToken?: TokenSink): Promise<LlmResponse> {
-    const last = messages.at(-1);
+    // 找"对话里的最后一条"，而不是整条请求的最后一条。
+    // Loop 为了前缀缓存把本回合注入拼在对话之后（`[...convo, ...injected]`，见 loop.ts），
+    // 注入全是 role='system'。用 at(-1) 的话，只要命中了任何注入（记忆/知识目录/资料库），
+    // 末条永远是 system，下面这个"上一步是工具结果"的判断就永不成立——
+    // 假模型看不见自己刚调过工具，于是每一步重发同一个调用，直到撞上 GB_MAX_STEPS。
+    const last = [...messages].reverse().find((m) => m.role !== 'system');
     if (last?.role === 'tool') {
       const text = `工具返回了「${truncate(last.content)}」，任务完成。`;
       await emitStream(text, onToken);

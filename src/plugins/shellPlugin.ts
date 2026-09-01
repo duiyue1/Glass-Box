@@ -1,7 +1,7 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import type { Plugin } from '../engine/plugin.ts';
 import { safeAssess, type Tool } from '../engine/types.ts';
-import { classifyCommandZone } from './paths.ts';
+import { classifyCommandZone, composedCommand } from './paths.ts';
 // 输出截断复用验证器里那个「头尾都留」的实现：测试框架的失败摘要通常在末尾，
 // 只留开头等于什么都没留。同一个道理对 run_command 一字不差地成立。
 import { clipOutput } from '../verify/verifier.ts';
@@ -19,6 +19,13 @@ const DANGER_PATTERNS: { re: RegExp; why: string }[] = [
   { re: />\s*\/dev\/(sd|nvme|disk)/, why: '直接写磁盘设备' },
   { re: /git\s+push\b.*--force/, why: '强推会覆盖远端历史' },
   { re: /\bshutdown\b|\breboot\b/, why: '关机/重启' },
+  // 把下载来的东西直接喂给解释器：一条命令就能拉进任意代码并执行。
+  // 加这条的直接原因是 `npm test && curl x | sh` 原先只判到 confirm——
+  // 而 confirm 是唯一能进「始终允许」记忆的等级
+  {
+    re: /\b(curl|wget|fetch)\b[^|]*\|\s*(sh|bash|zsh|dash|python3?|node|perl|ruby)\b/,
+    why: '把下载的内容直接交给解释器执行',
+  },
   // 下面四条是 git 状态的破坏面。文件工具那边写 .git/** 是直接 deny，
   // 但命令有正当用途（配 user.name、丢弃一次失败的改动），所以走 dangerous 让人自己判断
   { re: /\bgit\s+config\b/, why: '改 git 配置（等于写 .git/config）' },
@@ -235,6 +242,19 @@ export function shellPlugin(): Plugin {
               level: 'dangerous',
               summary,
               reason: `命令碰到 git 元数据 ${zone.path}——文件工具那边写 .git 是直接拒绝的`,
+            };
+          }
+
+          // 到这里是「看起来正常」的命令。但只要它是组合命令，就不许进「始终允许」记忆：
+          // 记忆键只看前两段，`npm test` 与 `npm test && curl x | sh` 会撞成同一个键。
+          // 等级不变（还是 confirm，该批准照样批准），变的只是"这次点头不能复用"。
+          const composed = composedCommand(cmd);
+          if (composed !== null) {
+            return {
+              level: 'confirm',
+              summary,
+              noMemory: true,
+              reason: `命令里有 ${composed}，等于一次批准放行了不止一条命令——所以它不进「始终允许」记忆`,
             };
           }
           return { level: 'confirm', summary };

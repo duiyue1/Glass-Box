@@ -1,0 +1,86 @@
+{
+  "name": "agent 端到端任务集 v1",
+  "note": "每条任务都是「给一个跑不过的工作区 + 一句话」，判定靠跑测试，不靠模型打分。frozen 里的文件被改动即判失败——否则「删掉断言」就是一条零成本的作弊路径。",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "修一个 off-by-one",
+      "dimension": "定位并修 bug",
+      "prompt": "check.test.js 跑不过。修 sum.js 让它通过，不要改测试文件。",
+      "verify": "node --test check.test.js",
+      "frozen": ["check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t1\",\n  \"type\": \"module\"\n}\n",
+        "sum.js": "export function sum(xs) {\n  let total = 0;\n  for (let i = 0; i < xs.length - 1; i++) {\n    total += xs[i];\n  }\n  return total;\n}\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from './sum.js';\n\ntest('sum 把所有元素都加上', () => {\n  assert.equal(sum([1, 2, 3]), 6);\n  assert.equal(sum([5]), 5);\n  assert.equal(sum([]), 0);\n});\n"
+      }
+    },
+    {
+      "id": "T2",
+      "title": "按测试补齐 slugify",
+      "dimension": "按规格加功能",
+      "prompt": "让 check.test.js 全部通过，只改 slugify.js。",
+      "verify": "node --test check.test.js",
+      "frozen": ["check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t2\",\n  \"type\": \"module\"\n}\n",
+        "slugify.js": "export function slugify(s) {\n  return s.toLowerCase().replace(/ /g, '-');\n}\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { slugify } from './slugify.js';\n\ntest('slugify 规范化标题', () => {\n  assert.equal(slugify('Hello World'), 'hello-world');\n  assert.equal(slugify('  Hello   World  '), 'hello-world');\n  assert.equal(slugify('Hello, World!'), 'hello-world');\n  assert.equal(slugify('a--b'), 'a-b');\n  assert.equal(slugify(''), '');\n});\n"
+      }
+    },
+    {
+      "id": "T3",
+      "title": "把重复的校验抽成一个模块",
+      "dimension": "跨文件重构",
+      "prompt": "a.js 和 b.js 里有一份一模一样的邮箱校验逻辑。把它抽到新文件 validate.js 里导出 isEmail，两处都改成引用它，行为不变。check.test.js 必须通过。",
+      "verify": "node --test check.test.js",
+      "frozen": ["check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t3\",\n  \"type\": \"module\"\n}\n",
+        "a.js": "export function registerUser(email) {\n  if (!/^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$/i.test(email)) return { ok: false, error: '邮箱格式不对' };\n  return { ok: true, email: email.toLowerCase() };\n}\n",
+        "b.js": "export function subscribe(email) {\n  if (!/^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$/i.test(email)) return { ok: false, error: '邮箱格式不对' };\n  return { ok: true, list: 'weekly', email: email.toLowerCase() };\n}\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\nimport { registerUser } from './a.js';\nimport { subscribe } from './b.js';\nimport { isEmail } from './validate.js';\n\ntest('抽完之后行为不变', () => {\n  assert.equal(registerUser('X@Y.com').ok, true);\n  assert.equal(registerUser('bad').ok, false);\n  assert.equal(subscribe('x@y.com').list, 'weekly');\n  assert.equal(subscribe('bad').ok, false);\n});\n\ntest('校验逻辑只剩一份', () => {\n  assert.equal(isEmail('x@y.com'), true);\n  assert.equal(isEmail('bad'), false);\n  for (const f of ['a.js', 'b.js']) {\n    const src = fs.readFileSync(f, 'utf8');\n    assert.ok(src.includes('validate.js'), f + ' 应该引用 validate.js');\n    assert.ok(!src.includes('[^@'), f + ' 里还留着那段正则');\n  }\n});\n"
+      }
+    },
+    {
+      "id": "T4",
+      "title": "在一堆常量里找出错的那个",
+      "dimension": "在较长文件里定位",
+      "prompt": "有人反馈重试等待太久了。check.test.js 里写了期望值，改 limits.js 让它通过。",
+      "verify": "node --test check.test.js",
+      "frozen": ["check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t4\",\n  \"type\": \"module\"\n}\n",
+        "limits.js": "// 全局限额与超时。改这里要同步改文档。\nexport const LIMITS = {\n  maxUploadBytes: 10 * 1024 * 1024,\n  maxAvatarBytes: 512 * 1024,\n  maxNameLength: 64,\n  maxBioLength: 280,\n  maxTagsPerPost: 8,\n  maxPostsPerPage: 20,\n  maxSearchResults: 100,\n  maxBatchSize: 500,\n  maxConcurrentJobs: 4,\n  maxQueueDepth: 1000,\n  sessionTtlSeconds: 3600,\n  refreshTtlSeconds: 604800,\n  otpTtlSeconds: 300,\n  requestTimeoutMs: 30000,\n  connectTimeoutMs: 3000,\n  idleTimeoutMs: 60000,\n  retryBackoffMs: 5000,\n  retryMaxAttempts: 3,\n  cacheTtlMs: 120000,\n  rateLimitPerMinute: 60,\n  uploadPartBytes: 5 * 1024 * 1024,\n  logSampleRate: 0.01,\n};\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { LIMITS } from './limits.js';\n\ntest('重试退避基准是 500ms，不是 5s', () => {\n  assert.equal(LIMITS.retryBackoffMs, 500);\n});\n\ntest('别的限额一个都不许动', () => {\n  assert.equal(LIMITS.requestTimeoutMs, 30000);\n  assert.equal(LIMITS.idleTimeoutMs, 60000);\n  assert.equal(LIMITS.retryMaxAttempts, 3);\n  assert.equal(LIMITS.maxBatchSize, 500);\n  assert.equal(LIMITS.sessionTtlSeconds, 3600);\n});\n"
+      }
+    },
+    {
+      "id": "T5",
+      "title": "只改该改的那个文件",
+      "dimension": "改动范围收得住",
+      "prompt": "clamp 没有夹住上界，修 a.js。b.js 的风格很糟但它是对的，不要动它。",
+      "verify": "node --test check.test.js",
+      "frozen": ["b.js", "check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t5\",\n  \"type\": \"module\"\n}\n",
+        "a.js": "export function clamp(n, lo, hi) {\n  if (n < lo) return lo;\n  return n;\n}\n",
+        "b.js": "// 风格很糟，但它是对的，别顺手重写\nexport function clamp2(n,lo,hi){var r=n;if(r<lo){r=lo}if(r>hi){r=hi}return r}\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { clamp } from './a.js';\nimport { clamp2 } from './b.js';\n\ntest('clamp 上下界都要夹', () => {\n  assert.equal(clamp(5, 1, 3), 3);\n  assert.equal(clamp(0, 1, 3), 1);\n  assert.equal(clamp(2, 1, 3), 2);\n});\n\ntest('b.js 还能用', () => {\n  assert.equal(clamp2(5, 1, 3), 3);\n});\n"
+      }
+    },
+    {
+      "id": "T6",
+      "title": "不给提示，自己跑测试找原因",
+      "dimension": "会用工具自查",
+      "prompt": "这个项目的测试跑不过，你自己跑一下看看，然后修好。",
+      "verify": "node --test check.test.js",
+      "frozen": ["check.test.js", "package.json"],
+      "files": {
+        "package.json": "{\n  \"name\": \"task-t6\",\n  \"type\": \"module\"\n}\n",
+        "format.js": "export function pad2(n) {\n  return String(n).padStart(2, '0');\n}\n\nexport function hhmm(date) {\n  return pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes);\n}\n",
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { hhmm } from './format.js';\n\ntest('hhmm 输出零补齐的时分', () => {\n  assert.equal(hhmm(new Date('2026-01-02T09:05:00Z')), '09:05');\n  assert.equal(hhmm(new Date('2026-01-02T23:59:00Z')), '23:59');\n  assert.equal(hhmm(new Date('2026-01-02T00:00:00Z')), '00:00');\n});\n"
+      }
+    }
+  ]
+}

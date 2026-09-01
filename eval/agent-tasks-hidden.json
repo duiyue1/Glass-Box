@@ -1,0 +1,49 @@
+{
+  "name": "agent 端到端任务集 hidden-spec v1",
+  "note": "验收测试对 agent 隐藏（放在 hidden 里，跑完才铺进去）。前两套之所以 100% 通过，是因为测试文件本身就是一份可以照抄的规格；把它藏起来，规格只以自然语言给出，agent 就必须自己推边界、自己写测试自查——量的才是 agent 的干活能力，而不是模型会不会写这段代码。",
+  "tasks": [
+    {
+      "id": "X1",
+      "title": "按文字规格实现 query 解析（验收测试不给看）",
+      "dimension": "自己推边界",
+      "prompt": "parse.js 里的 parseQuery 实现得很粗糙，按下面的规格把它改对：\n1) 前导的 ? 可有可无；\n2) 空串、或只有一个 ?，返回空对象 {}；\n3) 键和值都要做 percent 解码，并且把 + 解成空格；\n4) 没有等号的键，它的值是空字符串（不是 undefined，也不是字符串 \"undefined\"）；\n5) 值里含等号时，只按第一个等号切分；\n6) 同一个键出现多次时，把值收成数组，保持出现顺序；只出现一次时仍然是字符串。\n另外：这个模块对外只允许导出 parseQuery 一个东西，并且它只接一个参数——不要新增导出，也不要给参数加默认值。\n我会用我自己的一套测试来验收，你看不到它，所以自己想办法确认每条都做到了。",
+      "verify": "node --test check.test.js",
+      "files": {
+        "package.json": "{\n  \"name\": \"task-x1\",\n  \"type\": \"module\"\n}\n",
+        "parse.js": "/** 解析 query string。目前只做了最粗糙的一版。 */\nexport function parseQuery(s) {\n  const out = {};\n  for (const pair of s.replace(/^\\?/, '').split('&')) {\n    const [k, v] = pair.split('=');\n    out[k] = decodeURIComponent(v);\n  }\n  return out;\n}\n"
+      },
+      "hidden": {
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport * as mod from './parse.js';\n\nconst { parseQuery } = mod;\n\ntest('导出面与参数个数都不许变', () => {\n  assert.deepEqual(Object.keys(mod).sort(), ['parseQuery']);\n  assert.equal(parseQuery.length, 1);\n});\n\ntest('基本解析', () => {\n  assert.deepEqual(parseQuery('?a=1&b=2'), { a: '1', b: '2' });\n  assert.deepEqual(parseQuery('a=1&b=2'), { a: '1', b: '2' });\n});\n\ntest('空输入', () => {\n  assert.deepEqual(parseQuery(''), {});\n  assert.deepEqual(parseQuery('?'), {});\n});\n\ntest('没有等号的键', () => {\n  assert.deepEqual(parseQuery('a'), { a: '' });\n  assert.deepEqual(parseQuery('a&b=1'), { a: '', b: '1' });\n});\n\ntest('重复键收成数组', () => {\n  assert.deepEqual(parseQuery('a=1&a=2'), { a: ['1', '2'] });\n  assert.deepEqual(parseQuery('a=1&a=2&a=3'), { a: ['1', '2', '3'] });\n  assert.deepEqual(parseQuery('a=1'), { a: '1' });\n});\n\ntest('解码与加号', () => {\n  assert.deepEqual(parseQuery('a%20b=1'), { 'a b': '1' });\n  assert.deepEqual(parseQuery('q=%E4%B8%AD%E6%96%87'), { q: '中文' });\n  assert.deepEqual(parseQuery('q=a+b'), { q: 'a b' });\n});\n\ntest('只按第一个等号切', () => {\n  assert.deepEqual(parseQuery('t=a=b'), { t: 'a=b' });\n});\n"
+      }
+    },
+    {
+      "id": "X2",
+      "title": "按文字规格实现并发池（验收测试不给看）",
+      "dimension": "自己推边界",
+      "prompt": "pool.js 里的 mapLimit 现在是串行的，limit 根本没用上。按下面的规格实现它：\n1) 同时最多有 limit 个 worker 在跑，而且在任务足够多时并发**要真的达到** limit，不能更少；\n2) 返回的结果数组按**输入顺序**排列，不是按完成顺序；\n3) 任意一个 worker 抛错时，整个 mapLimit 要 reject，并把那个错误透出去；\n4) items 为空时返回空数组；limit 大于任务数时也要正常工作，不能卡住。\n函数签名 mapLimit(items, limit, worker) 保持不变。\n我会用我自己的一套测试来验收（其中会测量并发峰值和总耗时），你看不到它，所以自己写点东西验一下再收工。",
+      "verify": "node --test check.test.js",
+      "timeoutMs": 90000,
+      "files": {
+        "package.json": "{\n  \"name\": \"task-x2\",\n  \"type\": \"module\"\n}\n",
+        "pool.js": "/**\n * 按并发上限跑一批任务，结果按输入顺序返回。\n * 现在的实现是串行的：limit 被忽略了。\n */\nexport async function mapLimit(items, limit, worker) {\n  const out = [];\n  for (const item of items) out.push(await worker(item));\n  return out;\n}\n"
+      },
+      "hidden": {
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { mapLimit } from './pool.js';\n\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n\ntest('顺序正确且并发峰值等于上限', async () => {\n  let running = 0;\n  let peak = 0;\n  const out = await mapLimit([1, 2, 3, 4, 5, 6, 7, 8], 3, async (n) => {\n    running += 1;\n    peak = Math.max(peak, running);\n    await sleep(30);\n    running -= 1;\n    return n * 2;\n  });\n  assert.deepEqual(out, [2, 4, 6, 8, 10, 12, 14, 16]);\n  assert.equal(peak, 3, `并发峰值应为 3，实际 ${peak}`);\n});\n\ntest('快的先完成也不打乱顺序', async () => {\n  const out = await mapLimit([50, 10, 30], 3, async (ms) => {\n    await sleep(ms);\n    return ms;\n  });\n  assert.deepEqual(out, [50, 10, 30]);\n});\n\ntest('边界输入', async () => {\n  assert.deepEqual(await mapLimit([1, 2], 10, async (n) => n), [1, 2]);\n  assert.deepEqual(await mapLimit([], 3, async () => 1), []);\n});\n\ntest('抛错要透出去', async () => {\n  await assert.rejects(\n    () =>\n      mapLimit([1, 2, 3], 2, async (n) => {\n        if (n === 2) throw new Error('boom');\n        return n;\n      }),\n    /boom/,\n  );\n});\n\ntest('并发是真的：8 个 30ms 任务、上限 4，总耗时明显小于串行', async () => {\n  const t0 = Date.now();\n  await mapLimit([1, 2, 3, 4, 5, 6, 7, 8], 4, async () => sleep(30));\n  const ms = Date.now() - t0;\n  assert.ok(ms < 150, `应在 150ms 内跑完（串行要 240ms+），实际 ${ms}ms`);\n});\n"
+      }
+    },
+    {
+      "id": "X3",
+      "title": "按文字规格实现 semver 比较（验收测试不给看）",
+      "dimension": "自己推边界",
+      "prompt": "semver.js 里的 compare 现在是拿字符串直接比的，几乎所有边界都错。按下面的规格实现 compare(a, b)：a 小于 b 返回 -1，大于返回 1，相等返回 0。\n1) 主干（major.minor.patch）逐段按**数字**比较，不是按字符串；\n2) 段数不足时按 0 补齐，所以 '1.2' 和 '1.2.0' 相等，'1' 和 '1.0.0' 相等；\n3) 容忍前导的 v 和首尾空白；\n4) + 后面的 build 元数据完全不参与比较；\n5) 主干相同时，带预发布后缀（- 后面那段）的**小于**不带的；\n6) 两边都有预发布时，按 . 分段逐个比：两边都是纯数字就按数字比；一边数字一边含字母时，纯数字的那个更小；都含字母就按字典序比；前面都相同而段数不同时，段数少的更小；\n7) compare 要能直接传给 Array.prototype.sort 使用。\n我会用我自己的一套测试来验收，你看不到它。自己把边界过一遍再收工。",
+      "verify": "node --test check.test.js",
+      "files": {
+        "package.json": "{\n  \"name\": \"task-x3\",\n  \"type\": \"module\"\n}\n",
+        "semver.js": "/**\n * 比较两个版本号：a < b 返回 -1，a > b 返回 1，相等返回 0。\n * 现在只是拿字符串比，几乎所有边界都不对。\n */\nexport function compare(a, b) {\n  return a < b ? -1 : a > b ? 1 : 0;\n}\n"
+      },
+      "hidden": {
+        "check.test.js": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { compare } from './semver.js';\n\ntest('主干按数字比', () => {\n  assert.equal(compare('1.2.10', '1.2.9'), 1);\n  assert.equal(compare('1.10.0', '1.9.0'), 1);\n  assert.equal(compare('2.0.0', '10.0.0'), -1);\n});\n\ntest('缺段补 0', () => {\n  assert.equal(compare('1.2', '1.2.0'), 0);\n  assert.equal(compare('1', '1.0.0'), 0);\n  assert.equal(compare('1.2', '1.2.1'), -1);\n});\n\ntest('前导 v 与空白', () => {\n  assert.equal(compare('v1.2.3', '1.2.3'), 0);\n  assert.equal(compare('  1.2.3 ', '1.2.3'), 0);\n});\n\ntest('预发布小于正式版', () => {\n  assert.equal(compare('1.2.0-alpha', '1.2.0'), -1);\n  assert.equal(compare('1.2.0', '1.2.0-alpha'), 1);\n});\n\ntest('预发布之间的比较', () => {\n  assert.equal(compare('1.2.0-alpha.2', '1.2.0-alpha.10'), -1);\n  assert.equal(compare('1.2.0-alpha', '1.2.0-beta'), -1);\n  assert.equal(compare('1.2.0-rc.1', '1.2.0-rc.1'), 0);\n  assert.equal(compare('1.2.0-alpha', '1.2.0-alpha.1'), -1);\n  assert.equal(compare('1.2.0-1', '1.2.0-alpha'), -1);\n});\n\ntest('build 元数据不参与比较', () => {\n  assert.equal(compare('1.2.0+build.9', '1.2.0+build.1'), 0);\n  assert.equal(compare('1.2.0-alpha+x', '1.2.0-alpha+y'), 0);\n});\n\ntest('可直接用于 sort', () => {\n  const sorted = ['1.2.0', '1.2.0-beta', '1.0.0', '1.2.0-alpha.2', '1.2.0-alpha.10'].sort(compare);\n  assert.deepEqual(sorted, ['1.0.0', '1.2.0-alpha.2', '1.2.0-alpha.10', '1.2.0-beta', '1.2.0']);\n});\n"
+      }
+    }
+  ]
+}

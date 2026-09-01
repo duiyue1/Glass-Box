@@ -59,6 +59,63 @@ export function resolveModelConfig(): ModelConfig {
 /** 工具结果回喂给模型时的前缀。也是最容易被模型"顺手续写"的标记，所以同时作为停止词。 */
 export const TOOL_RESULT_MARK = '【工具结果】';
 
+// ── 重试与退避 ──────────────────────────────────────────────────────
+
+/** 退避基准。测试里调到 1ms，别让重试逻辑把测试拖成秒级 */
+const RETRY_BASE_MS = 500;
+/** 单次等待上限。`Retry-After: 300` 这种也不能真的挂五分钟 */
+const RETRY_CAP_MS = 20_000;
+
+/**
+ * 这个 HTTP 状态值不值得再试一次。
+ *
+ * `429` 是限流——**这是原先最大的漏网之鱼**：只有 `>= 500` 会重试，
+ * 于是长回合里撞上一次限流，整个回合就报废了，而限流恰恰是最该等一下再试的情况。
+ * 4xx 的其它状态是请求本身有问题（参数错、鉴权失败），重试只是白等。
+ */
+export function retryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/**
+ * 这次失败之后该等多久再试。
+ *
+ * 优先听服务端的 `Retry-After`（秒数和 HTTP 日期两种写法都有网关在用）——
+ * 它比我们瞎猜准，无视它继续重试只会再吃一次限流。
+ * 服务端没给就指数退避 + 抖动：固定间隔会让并行跑的多个子 agent
+ * 在同一毫秒一起撞上来，退避的意义就没了。
+ *
+ * @param headers 失败响应的头；网络异常时没有响应，传 undefined
+ * @param attempt 这是第几次尝试（从 1 开始）
+ */
+export function retryDelayMs(headers: Headers | undefined, attempt: number): number {
+  const raw = headers?.get?.('retry-after')?.trim();
+  if (raw) {
+    const secs = Number(raw);
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, RETRY_CAP_MS);
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) return Math.min(Math.max(at - Date.now(), 0), RETRY_CAP_MS);
+  }
+  const base = Number(process.env.GLASSBOX_RETRY_BASE_MS ?? RETRY_BASE_MS);
+  const grown = Math.min((Number.isFinite(base) ? base : RETRY_BASE_MS) * 2 ** (attempt - 1), RETRY_CAP_MS);
+  return Math.round(grown * (0.5 + Math.random() / 2));
+}
+
+/** 可被用户中断打断的等待。按了停就不该继续躺在退避里 */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+
 /**
  * 模型越过自己的回合、继续替我们编造后续对话时会冒出的标记。
  * 抽取指令时遇到它们就截断——否则这些垃圾会原样成为工具参数。
@@ -311,7 +368,8 @@ export function mapMessages(messages: Msg[], native: boolean): object[] {
 }
 
 type ChatOk = { ok: true; content: string; toolCalls?: ToolCall[]; usage?: TokenUsage };
-type ChatErr = { ok: false; error: string };
+/** `partial`：流式已经吐给用户、但这次请求最终失败的那半句。只有真的上了屏才会有 */
+type ChatErr = { ok: false; error: string; partial?: string };
 
 /**
  * RealLlm：调用 OpenAI 兼容 /chat/completions 的真实模型。实现同一个 Llm 接口，
@@ -377,13 +435,17 @@ export class RealLlm implements Llm {
       // 只要还没往用户屏幕上吐字，就安全地改用非流式重来一次（带重试）。
       if (s.ok && (s.content.trim() || s.toolCalls?.length)) res = s;
       else if (!s.emitted && !signal?.aborted) res = await this.postChat(body, signal);
-      else res = s.ok ? s : { ok: false, error: s.error };
+      else res = s.ok ? s : { ok: false, error: s.error, partial: s.partial };
     } else {
       res = await this.postChat(body, signal);
     }
-    // 中断的请求不该把半截结果当成答复：抛出去，让 Loop 走它的中断收尾
-    if (signal?.aborted) throw new Error('用户中断');
+    // 已经吐给用户的那半句：中断和断连都要把它带回去，不能让屏幕上有、历史里没有
+    const partial = res.ok ? '' : (res.partial ?? '');
+    // 中断的请求不该把半截结果当成答复：抛出去，让 Loop 走它的中断收尾。
+    // 但那半句要挂在错误上带过去，由 Loop 决定怎么写进历史
+    if (signal?.aborted) throw Object.assign(new Error('用户中断'), { partial });
     if (!res.ok) {
+      if (partial) return { text: `${partial}\n（连接中断，上面这段没说完）` };
       return isContextOverflow(res.error) ? { text: `（${res.error}）`, overflow: true } : { text: `（模型调用失败：${res.error}）` };
     }
 
@@ -402,141 +464,170 @@ export class RealLlm implements Llm {
    * 流式请求（SSE）。逐块解析 `data: {...}`：
    * - delta.content 是给人看的文本，经 StreamGate 过滤后通过 onToken 吐出去；
    * - delta.tool_calls 是分片到达的工具调用，按 index 累积 name/arguments，收完再一次性返回。
-   * 流式不做重试（会导致重复输出）；若一个 token 都没吐就失败，交给调用方回退到非流式。
+   *
+   * 重试的边界是**"有没有往用户屏幕上吐过字"**（`emitted`），不是"失败了没有"：
+   * 一个 token 都没吐出去时，这次请求对外不可见，重放是安全的（限流/5xx/网络异常都可以退避后再来）；
+   * 一旦吐出过内容，重放会让同一段话出现两遍——那时只能如实失败，
+   * 由调用方决定是回退非流式还是把错误交给 Loop。
    */
   private async streamChat(
     body: object,
     onToken: TokenSink,
     external?: AbortSignal,
-  ): Promise<(ChatOk & { emitted?: boolean }) | { ok: false; error: string; emitted: boolean }> {
+  ): Promise<(ChatOk & { emitted?: boolean }) | { ok: false; error: string; emitted: boolean; partial?: string }> {
     const url = `${this.cfg.baseUrl.replace(/\/$/, '')}/chat/completions`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
-    // 超时和用户中断是两个独立的理由，谁先来都要断开连接
-    const signal = external ? AbortSignal.any([ctrl.signal, external]) : ctrl.signal;
     let emitted = false;
+    // 已经收到的正文。声明在循环外，因为断在流中间时 catch 也要拿它——
+    // 放在 try 里的话，用户屏幕上那半句就再也取不回来了
+    let full = '';
     // 流式默认不带 usage，要显式要一条统计块。老网关可能不认这个参数，
     // 所以 400 时脱掉它重来一次（此时还没吐字，重来是安全的）。
     const wantUsage = process.env.GB_USAGE !== '0';
+    let lastError = 'unknown';
+    /** 失败时要不要把半句带回去：只有真的上过屏才算，没上屏的重放更划算 */
+    const withPartial = (): { partial?: string } => (emitted && full ? { partial: full } : {});
 
-    try {
-      const post = (withUsage: boolean) =>
-        fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.cfg.apiKey}` },
-          body: JSON.stringify({
-            ...body,
-            stream: true,
-            ...(withUsage ? { stream_options: { include_usage: true } } : {}),
-          }),
-          signal,
-        });
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      // 用户中断了就别再开下一次尝试：重试会让"按了停还在跑"
+      if (external?.aborted) return { ok: false, error: '用户中断', emitted, ...withPartial() };
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+      // 超时和用户中断是两个独立的理由，谁先来都要断开连接
+      const signal = external ? AbortSignal.any([ctrl.signal, external]) : ctrl.signal;
 
-      let resp = await post(wantUsage);
-      if (!resp.ok && resp.status === 400 && wantUsage) resp = await post(false);
-      if (!resp.ok) {
-        const errText = await resp.text();
-        clearTimeout(timer);
-        return { ok: false, error: `HTTP ${resp.status}: ${errText.slice(0, 200)}`, emitted };
-      }
-      if (!resp.body) {
-        clearTimeout(timer);
-        return { ok: false, error: '流式响应无响应体', emitted };
-      }
+      try {
+        const post = (withUsage: boolean) =>
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.cfg.apiKey}` },
+            body: JSON.stringify({
+              ...body,
+              stream: true,
+              ...(withUsage ? { stream_options: { include_usage: true } } : {}),
+            }),
+            signal,
+          });
 
-      const gate = new StreamGate();
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let full = '';
-      let usage: TokenUsage | undefined;
-      // 工具调用按 index 累积：id/name 只在第一片出现，arguments 是一小段一小段拼出来的
-      const acc = new Map<number, { id: string; name: string; args: string }>();
+        let resp = await post(wantUsage);
+        if (!resp.ok && resp.status === 400 && wantUsage) resp = await post(false);
+        if (!resp.ok) {
+          const errText = await resp.text();
+          clearTimeout(timer);
+          lastError = `HTTP ${resp.status}: ${errText.slice(0, 200)}`;
+          if (!emitted && retryableStatus(resp.status) && attempt < this.maxAttempts) {
+            await sleep(retryDelayMs(resp.headers, attempt), external);
+            continue;
+          }
+          return { ok: false, error: lastError, emitted, ...withPartial() };
+        }
+        if (!resp.body) {
+          clearTimeout(timer);
+          return { ok: false, error: '流式响应无响应体', emitted, ...withPartial() };
+        }
 
-      const handleLine = (line: string): void => {
-        if (!line.startsWith('data:')) return;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') return;
-        try {
-          const j = JSON.parse(payload) as {
-            usage?: unknown;
-            choices?: {
-              delta?: {
-                content?: string;
-                tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
-              };
-            }[];
-          };
-          // usage 通常在最后一个块里（choices 为空），也有网关每块都带
-          const u = parseUsage(j.usage);
-          if (u) usage = u;
-          const delta = j.choices?.[0]?.delta;
-          const text = delta?.content;
-          if (typeof text === 'string' && text) {
-            full += text;
-            const out = gate.push(text);
-            if (out) {
-              emitted = true;
-              onToken(out);
+        const gate = new StreamGate();
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        // 每次尝试都从空开始：重试只发生在"还没吐字"时，不清掉会把上一次的正文接上去
+        full = '';
+        let usage: TokenUsage | undefined;
+        // 工具调用按 index 累积：id/name 只在第一片出现，arguments 是一小段一小段拼出来的
+        const acc = new Map<number, { id: string; name: string; args: string }>();
+
+        const handleLine = (line: string): void => {
+          if (!line.startsWith('data:')) return;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') return;
+          try {
+            const j = JSON.parse(payload) as {
+              usage?: unknown;
+              choices?: {
+                delta?: {
+                  content?: string;
+                  tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+                };
+              }[];
+            };
+            // usage 通常在最后一个块里（choices 为空），也有网关每块都带
+            const u = parseUsage(j.usage);
+            if (u) usage = u;
+            const delta = j.choices?.[0]?.delta;
+            const text = delta?.content;
+            if (typeof text === 'string' && text) {
+              full += text;
+              const out = gate.push(text);
+              if (out) {
+                emitted = true;
+                onToken(out);
+              }
             }
+            for (const tc of delta?.tool_calls ?? []) {
+              const i = tc.index ?? 0;
+              const cur = acc.get(i) ?? { id: '', name: '', args: '' };
+              if (tc.id) cur.id = tc.id;
+              if (tc.function?.name) cur.name = tc.function.name;
+              if (tc.function?.arguments) cur.args += tc.function.arguments;
+              acc.set(i, cur);
+            }
+          } catch {
+            // 忽略无法解析的行
           }
-          for (const tc of delta?.tool_calls ?? []) {
-            const i = tc.index ?? 0;
-            const cur = acc.get(i) ?? { id: '', name: '', args: '' };
-            if (tc.id) cur.id = tc.id;
-            if (tc.function?.name) cur.name = tc.function.name;
-            if (tc.function?.arguments) cur.args += tc.function.arguments;
-            acc.set(i, cur);
+        };
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf('\n')) >= 0) {
+            handleLine(buf.slice(0, idx).trim());
+            buf = buf.slice(idx + 1);
           }
-        } catch {
-          // 忽略无法解析的行
         }
-      };
+        // 流结束后缓冲里可能还剩最后一行（末尾没有换行）。
+        // 不处理它就会丢内容——极端情况下整段回复只有一行、又没有换行结尾，
+        // 就会得到「模型返回为空」，而同样的请求非流式却是正常的。
+        if (buf.trim()) handleLine(buf.trim());
 
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          handleLine(buf.slice(0, idx).trim());
-          buf = buf.slice(idx + 1);
+        clearTimeout(timer);
+        const tail = gate.flush();
+        if (tail) {
+          emitted = true;
+          onToken(tail);
         }
-      }
-      // 流结束后缓冲里可能还剩最后一行（末尾没有换行）。
-      // 不处理它就会丢内容——极端情况下整段回复只有一行、又没有换行结尾，
-      // 就会得到「模型返回为空」，而同样的请求非流式却是正常的。
-      if (buf.trim()) handleLine(buf.trim());
 
-      clearTimeout(timer);
-      const tail = gate.flush();
-      if (tail) {
-        emitted = true;
-        onToken(tail);
+        const toolCalls = [...acc.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, c]) => c)
+          .filter((c) => c.name)
+          .map((c, i) => ({
+            id: c.id || `c_${Date.now()}_${i}`,
+            name: c.name,
+            args: parseToolArgs(c.args),
+          }));
+        return { ok: true, content: full, toolCalls: toolCalls.length ? toolCalls : undefined, usage };
+      } catch (e) {
+        clearTimeout(timer);
+        // 中断也要把半句带回去：用户按停时屏幕上那段话是真实发生过的
+        if (external?.aborted) return { ok: false, error: '用户中断', emitted, ...withPartial() };
+        lastError =
+          (e as Error).name === 'AbortError' ? `请求超时（${this.timeoutMs}ms）` : (e as Error).message;
+        // 断在流中间、且已经吐过字：不能重放，否则用户会看到同一段话两遍
+        if (!emitted && attempt < this.maxAttempts) {
+          await sleep(retryDelayMs(undefined, attempt), external);
+          continue;
+        }
+        return { ok: false, error: lastError, emitted, ...withPartial() };
       }
-
-      const toolCalls = [...acc.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(([, c]) => c)
-        .filter((c) => c.name)
-        .map((c, i) => ({
-          id: c.id || `c_${Date.now()}_${i}`,
-          name: c.name,
-          args: parseToolArgs(c.args),
-        }));
-      return { ok: true, content: full, toolCalls: toolCalls.length ? toolCalls : undefined, usage };
-    } catch (e) {
-      clearTimeout(timer);
-      const err = external?.aborted
-        ? '用户中断'
-        : (e as Error).name === 'AbortError'
-          ? `请求超时（${this.timeoutMs}ms）`
-          : (e as Error).message;
-      return { ok: false, error: err, emitted };
     }
+    return { ok: false, error: lastError, emitted, ...withPartial() };
   }
 
-  /** 带超时 + 重试的请求：网络异常/超时/5xx 会重试，最多 maxAttempts 次。 */
+  /**
+   * 带超时 + 退避重试的非流式请求：网络异常/超时/限流(429)/5xx 会重试，最多 maxAttempts 次。
+   * 重试之间会按 `Retry-After` 或指数退避等待——立刻重来只会再吃一次限流。
+   */
   private async postChat(body: unknown, external?: AbortSignal): Promise<ChatOk | ChatErr> {
     const url = `${this.cfg.baseUrl.replace(/\/$/, '')}/chat/completions`;
     let lastError = 'unknown';
@@ -560,7 +651,10 @@ export class RealLlm implements Llm {
         if (!resp.ok) {
           const errText = await resp.text();
           lastError = `HTTP ${resp.status}: ${errText.slice(0, 200)}`;
-          if (resp.status >= 500 && attempt < this.maxAttempts) continue; // 服务端错误可重试
+          if (retryableStatus(resp.status) && attempt < this.maxAttempts) {
+            await sleep(retryDelayMs(resp.headers, attempt), external);
+            continue;
+          }
           return { ok: false, error: lastError };
         }
         const data = (await resp.json()) as {
@@ -579,7 +673,10 @@ export class RealLlm implements Llm {
         clearTimeout(timer);
         if (external?.aborted) return { ok: false, error: '用户中断' };
         lastError = (e as Error).name === 'AbortError' ? `请求超时（${this.timeoutMs}ms）` : (e as Error).message;
-        if (attempt < this.maxAttempts) continue; // 网络异常/超时可重试
+        if (attempt < this.maxAttempts) {
+          await sleep(retryDelayMs(undefined, attempt), external); // 网络异常/超时可重试
+          continue;
+        }
         return { ok: false, error: lastError };
       }
     }

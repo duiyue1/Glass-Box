@@ -7,4 +7,7 @@ dist
 
 # 评测/浏览器自动化的产物，不是源码
 eval/runs
+eval/agent-runs
+eval/agent-sessions
+eval/security-runs
 midscene_run
