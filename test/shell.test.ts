@@ -11,6 +11,28 @@ import { shellPlugin } from '../src/plugins/shellPlugin.ts';
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * 删临时工作目录，删不掉就等一会儿再试。
+ *
+ * Windows 上被超时杀掉的子进程退出后，系统还短暂持有它的工作目录句柄，rmdir 报 EBUSY。
+ * `fs.rmSync` 的 `maxRetries` 帮不上：Node 的 rimraf 只在 unlink / ENOTEMPTY 那条路上
+ * 重试，**最后那次 rmdir 的 EBUSY 是直接抛出来的**（实测加了 maxRetries 耗时没变，
+ * 一次都没重试）。等不到就放过——拆卸失败不该把测试判红。
+ */
+function rmTemp(dir: string): void {
+  const sleep = (ms: number): void => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  };
+  for (let i = 0; i < 30; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      sleep(100);
+    }
+  }
+}
+
+/**
  * 一个"要跑一会儿"的命令。测试要验证的是超时/终止/增量读，不是 `sleep` 本身——
  * 而拿 `sleep` / `printf` 当道具会让整个测试套件在 Windows 原生环境挂掉。
  * 用 node 自己当慢命令：哪里跑得了测试，哪里就跑得了它。
@@ -31,14 +53,8 @@ function setup() {
   const tools = new ToolRegistry();
   loadPlugins([shellPlugin()], { tools, wire, workspace: ws });
   const call = (name: string, args: Record<string, unknown>) => tools.get(name)!.run(args);
-  // maxRetries 是给 Windows 的：被超时杀掉的子进程退出后，系统还会短暂持有工作目录句柄，
-  // 立刻 rmdir 会 EBUSY。POSIX 上一次就成功，这个参数不影响它。
-  return {
-    ws,
-    tools,
-    call,
-    cleanup: () => fs.rmSync(ws, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }),
-  };
+  // maxRetries 覆盖不到最后那次 rmdir 的 EBUSY，所以用自己的重试（见 rmTemp）
+  return { ws, tools, call, cleanup: () => rmTemp(ws) };
 }
 
 test('前台超时可配，超时后明说是超时、并指路后台', async () => {

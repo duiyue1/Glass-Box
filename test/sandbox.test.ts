@@ -147,13 +147,21 @@ test('空补丁不当成成功', () => {
 test('removeSandbox 把目录、worktree 登记和分支一起收拾干净', () => {
   const r = repo();
   const box = createSandbox(r);
+  // `git worktree list` 打印的路径用 `/`（git 内部一律正斜杠），而 box.dir 是
+  // path.join 出来的，Windows 上是 `C:\...`。直接 includes 永远不成立。
+  // Windows 文件系统还大小写不敏感，一并折叠。
+  const norm = (s: string): string => {
+    const slashed = s.split('\\').join('/');
+    return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+  };
+  const worktrees = (): string => norm(git(r, ['worktree', 'list']));
   try {
-    assert.ok(git(r, ['worktree', 'list']).includes(box.dir));
+    assert.ok(worktrees().includes(norm(box.dir)));
     assert.ok(git(r, ['branch', '--list', box.branch]).trim() !== '');
 
     removeSandbox(box);
     assert.equal(fs.existsSync(box.dir), false);
-    assert.ok(!git(r, ['worktree', 'list']).includes(box.dir));
+    assert.ok(!worktrees().includes(norm(box.dir)));
     assert.equal(git(r, ['branch', '--list', box.branch]).trim(), '', '分支也要删掉，否则越跑越多');
   } finally {
     fs.rmSync(r, { recursive: true, force: true });

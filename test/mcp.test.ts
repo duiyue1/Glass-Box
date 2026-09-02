@@ -8,6 +8,30 @@ import { ToolRegistry } from '../src/engine/toolRegistry.ts';
 import { connectMcp, mcpToolName, readMcpConfig } from '../src/mcp/register.ts';
 import { restoreArgs, toToolSchema } from '../src/mcp/client.ts';
 
+/**
+ * 删临时工作目录，删不掉就等一会儿再试。
+ *
+ * Windows 上 `close()` 只是 SIGTERM，子进程刚被杀、系统还短暂持有它的工作目录句柄，
+ * 这时 rmdir 报 EBUSY。`fs.rmSync` 的 `maxRetries` 帮不上：Node 的 rimraf 只在
+ * unlink / ENOTEMPTY 那条路上重试，**最后那次 rmdir 的 EBUSY 是直接抛出来的**
+ * （实测加了 `maxRetries: 20` 之后耗时仍是 117ms，一次都没重试过）。
+ *
+ * 等不到就放过：拆卸失败不该把测试判红，临时目录交给系统清理。
+ */
+function rmTemp(dir: string): void {
+  const sleep = (ms: number): void => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  };
+  for (let i = 0; i < 30; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      sleep(100);
+    }
+  }
+}
+
 /** 一个最小的 stdio MCP 服务器，够用来验证握手 / 列表 / 调用 / 报错四条路 */
 const FAKE_SERVER = `
 let buf = '';
@@ -56,9 +80,7 @@ function setup(servers: Record<string, unknown>, withServer = true) {
     tools,
     wire,
     connect: () => connectMcp({ workspace: ws, tools, wire, timeoutMs: 8000 }),
-    // maxRetries 是给 Windows 的：MCP 服务器是子进程，它退出后系统还会短暂持有目录句柄，
-    // 立刻 rmdir 会 EBUSY。POSIX 上一次就成功，这个参数不影响它。
-    cleanup: () => fs.rmSync(ws, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }),
+    cleanup: () => rmTemp(ws),
   };
 }
 
