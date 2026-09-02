@@ -87,7 +87,7 @@ node src/index.ts "任务" --sandbox --apply
 
 要求工作区是一个**有过至少一次提交**的 git 仓库，否则明确报错并以退出码 `2` 退出。
 
-四个入口都支持：
+四个入口的用法：
 
 ```bash
 node src/index.ts "任务" --sandbox          # 一次性：跑完给 diff，--apply 直接合入
@@ -126,7 +126,6 @@ node src/index.ts "任务" --json | tail -1 | jq '{ok, replies, journal}'
 MIDSCENE_MODEL_BASE_URL=https://<your-openai-compatible-endpoint>/v1
 MIDSCENE_MODEL_NAME=<model-name>
 MIDSCENE_MODEL_API_KEY=<your-key>
-MIDSCENE_MODEL_FAMILY=gpt-5
 ```
 
 配了 key 后默认就用真实模型：
@@ -290,12 +289,13 @@ GLASSBOX_MODEL_WINDOW=12000 npm run eval:agent -- \
 必须一开始就跑不过"这一条，防夹具腐烂后通过率虚高）。
 和 `npm run eval` 的分工：那个测**资料库**这一个零件有没有用，这个测整个 agent 干活行不行。
 
-## 三个入口
+## 四个入口
 
 - **`node src/index.ts "<输入>"`** — 日志模式：把内部事件打成一条时间线，适合调试/看流程。
 - **`node src/tui.ts "<输入>"`（`npm run tui`）** — 分屏 TUI：左对话流 / 右玻璃盒面板；真实终端逐帧动画，管道输出最终定格。
 - **`node src/chat.ts`（`npm run chat`）** — 交互式多轮对话：真人逐句对话，关键动作实时流式提示，`/panel` 随时看面板，有风险操作实时向你请求确认。
-  - 命令：`/panel` 看玻璃盒面板 · `/help` 帮助 · `/exit` 退出
+  - 命令：`/panel` 看玻璃盒面板 · `/new` 开一个空白会话（不带上文）· `/help` 帮助 · `/exit` 退出
+  - 加了 `--sandbox` 时还有：`/diff` 看副本里改了什么 · `/apply` 打回主仓库 · `/drop` 整个丢弃
   - **回合跑飞了按 `Esc`（或 `Ctrl-C`）中断**：只掐这一个回合，做过的步骤留在历史里，接着聊就行；空闲时按 `Ctrl-C` 才是退出
 - **`node src/web.ts`（`npm run web`）** — Web UI：浏览器里的玻璃盒。左侧流式对话 + 内部动作轨迹，右侧实时面板（状态机 / 上下文预算 / Skills / 记忆 / 工具 / 子agent / 审批 / 事件流），审批以弹窗形式出现并彩色渲染 diff。回合进行中输入框旁会出现「停止」按钮。
   - **只监听 `127.0.0.1`**（这个 agent 能执行命令、读写文件，绝不对外暴露）；端口用 `GB_PORT` 调整。
@@ -409,7 +409,7 @@ GLASSBOX_MODEL_WINDOW=12000 npm run eval:agent -- \
 - `GB_PORT` — Web UI 端口（默认 7777，仅绑定 127.0.0.1）
 - `GLASSBOX_MODEL_TIMEOUT` / `GLASSBOX_MODEL_RETRIES` — 模型请求超时毫秒 / 最大尝试次数（默认 60000 / 2）
 - `GLASSBOX_RETRY_BASE_MS` — 重试退避基准毫秒（默认 500，指数增长 + 抖动，上限 20s；服务端给了 `Retry-After` 就听它的）
-- `MIDSCENE_MODEL_*` / `GLASSBOX_MODEL_*` — 模型配置（base url / name / api key / family）
+- `MIDSCENE_MODEL_*` / `GLASSBOX_MODEL_*` — 模型配置（base url / name / api key）
 
 ## 架构一览
 

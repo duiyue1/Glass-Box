@@ -51,9 +51,8 @@ interface Llm { complete(messages): Promise<LlmResponse>; }
 
 ```
 MIDSCENE_MODEL_BASE_URL=https://<your-openai-compatible-endpoint>/v1
-MIDSCENE_MODEL_NAME=gpt-5.5
+MIDSCENE_MODEL_NAME=<model-name>
 MIDSCENE_MODEL_API_KEY=sk-****（密钥）
-MIDSCENE_MODEL_FAMILY=gpt-5
 ```
 
 - 这些写在项目根目录的 **`.env`** 里，启动时由 `process.loadEnvFile()` 自动加载。

@@ -48,7 +48,7 @@ ACTION：grep foo              →  兼容中文冒号「：」
 - `GLASSBOX_MODEL_TIMEOUT` — 单次请求超时毫秒（默认 60000）
 - `GLASSBOX_MODEL_RETRIES` — 最大尝试次数（默认 2）
 
-（模型 base url / name / key / family 仍从 `.env` 的 `MIDSCENE_*` 或 `GLASSBOX_*` 读取。）
+（模型 base url / name / key 仍从 `.env` 的 `MIDSCENE_*` 或 `GLASSBOX_*` 读取。）
 
 ---
 

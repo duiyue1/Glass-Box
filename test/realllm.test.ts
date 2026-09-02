@@ -58,7 +58,7 @@ test('去掉指令尾部残留的反引号与空白', () => {
 
 /* ── 限流与退避重试 ── */
 
-const cfg = { baseUrl: 'http://x/v1', model: 'm', apiKey: 'k', family: 'f', contextWindow: 8000 };
+const cfg = { baseUrl: 'http://x/v1', model: 'm', apiKey: 'k', contextWindow: 8000 };
 
 /** 组一个只带 get 的最小 Headers 替身 */
 const headersOf = (h: Record<string, string>) =>

@@ -8,7 +8,6 @@ export interface ModelConfig {
   baseUrl: string;
   model: string;
   apiKey: string;
-  family: string;
   /** 上下文窗口（token）。网关不告诉我们这个数，只能由使用者声明。 */
   contextWindow: number;
 }
@@ -51,7 +50,6 @@ export function resolveModelConfig(): ModelConfig {
     baseUrl: env.GLASSBOX_MODEL_BASE_URL ?? env.MIDSCENE_MODEL_BASE_URL ?? '',
     model: env.GLASSBOX_MODEL_NAME ?? env.MIDSCENE_MODEL_NAME ?? '',
     apiKey: env.GLASSBOX_MODEL_API_KEY ?? env.MIDSCENE_MODEL_API_KEY ?? '',
-    family: env.GLASSBOX_MODEL_FAMILY ?? env.MIDSCENE_MODEL_FAMILY ?? '',
     contextWindow: Number.isInteger(window) && window > 0 ? window : DEFAULT_CONTEXT_WINDOW,
   };
 }

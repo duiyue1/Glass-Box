@@ -10,7 +10,6 @@ const cfg = {
   baseUrl: 'https://example.test/v1',
   model: 'm',
   apiKey: 'k',
-  family: '',
   contextWindow: 4000,
 };
 
