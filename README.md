@@ -1,9 +1,9 @@
 # Glass-Box · 可观测、可插拔的迷你 coding agent
 
-[![CI](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/Glass-Box/actions/workflows/ci.yml)
+[![CI](https://github.com/duiyue1/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/duiyue1/Glass-Box/actions/workflows/ci.yml)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.18-brightgreen)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
-![tests](https://img.shields.io/badge/tests-501-brightgreen)
+![tests](https://img.shields.io/badge/tests-503-brightgreen)
 
 > 一个跑在终端里的迷你 coding agent。它的特别之处不在"又一个 agent"，而在**把 agent 的内部机制装进玻璃盒**——状态机、工具调用、审批、Skills、记忆、上下文压缩，每一刻都看得见。引擎全自写、无黑盒；零凭证即可跑通。
 
@@ -25,7 +25,8 @@
 
 ## 快速开始
 
-要求：**Node ≥ 22.18**（这个版本起可以不带 flag 直接运行 `.ts`，无需编译）。macOS / Linux / Windows 都跑（CI 三平台矩阵）；
+要求：**Node ≥ 22.18**（这个版本起可以不带 flag 直接运行 `.ts`，无需编译）。macOS / Linux / Windows 都跑；
+CI 矩阵是 `ubuntu-latest` × `windows-latest` × Node `22.18`/`24` 四组（macOS 靠日常开发覆盖，没进 CI）。
 shell 工具用 `spawn({shell:true})` 不写死 `/bin/sh`，测试里的慢命令全用 node 自己当道具，不依赖 `sleep`/`printf`。
 唯一例外：符号链接相关的测试在 Windows 上需要开发者模式（没开就自动跳过，不是失败）。
 

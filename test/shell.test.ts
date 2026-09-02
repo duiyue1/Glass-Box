@@ -31,7 +31,14 @@ function setup() {
   const tools = new ToolRegistry();
   loadPlugins([shellPlugin()], { tools, wire, workspace: ws });
   const call = (name: string, args: Record<string, unknown>) => tools.get(name)!.run(args);
-  return { ws, tools, call, cleanup: () => fs.rmSync(ws, { recursive: true, force: true }) };
+  // maxRetries 是给 Windows 的：被超时杀掉的子进程退出后，系统还会短暂持有工作目录句柄，
+  // 立刻 rmdir 会 EBUSY。POSIX 上一次就成功，这个参数不影响它。
+  return {
+    ws,
+    tools,
+    call,
+    cleanup: () => fs.rmSync(ws, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }),
+  };
 }
 
 test('前台超时可配，超时后明说是超时、并指路后台', async () => {

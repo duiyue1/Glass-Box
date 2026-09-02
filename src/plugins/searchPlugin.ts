@@ -15,7 +15,11 @@ function walk(dir: string, root: string, acc: string[]): void {
     if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walk(full, root, acc);
-    else acc.push(path.relative(root, full));
+    // 统一成 `/`：这些相对路径要拿去和 globToRegExp 生成的正则比，而那些正则里的目录
+    // 分隔符写死是 `/`（`(?:.*/)?`）。Windows 上 path.relative 给的是 `src\foo.ts`，
+    // 于是 `glob **/*.ts` 一个都匹配不到。`/` 在 Windows 的 fs API 里照样能用，
+    // 后面 path.join(root, f) 读文件不受影响。
+    else acc.push(path.relative(root, full).split(path.sep).join('/'));
     if (acc.length >= MAX_FILES) return;
   }
 }

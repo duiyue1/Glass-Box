@@ -56,7 +56,9 @@ function setup(servers: Record<string, unknown>, withServer = true) {
     tools,
     wire,
     connect: () => connectMcp({ workspace: ws, tools, wire, timeoutMs: 8000 }),
-    cleanup: () => fs.rmSync(ws, { recursive: true, force: true }),
+    // maxRetries 是给 Windows 的：MCP 服务器是子进程，它退出后系统还会短暂持有目录句柄，
+    // 立刻 rmdir 会 EBUSY。POSIX 上一次就成功，这个参数不影响它。
+    cleanup: () => fs.rmSync(ws, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }),
   };
 }
 

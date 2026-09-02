@@ -31,8 +31,14 @@ const TRUNCATE_RESERVE = 48;
 /** 从一段 markdown 文本里解析出 frontmatter（--- 之间的 key: value）和正文 */
 function parseSkill(raw: string): { name: string; description: string; triggers: string[]; body: string } {
   const meta: Record<string, string> = {};
-  let body = raw;
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  // 先把换行统一成 \n（`src/kb/wiki.ts` 的 parseFrontmatter 早就这么做了，这里漏了）。
+  // 不归一化的话 CRLF 文件的头部是 `---\r\n`，下面那条 `^---\n` 整个匹配不上 →
+  // frontmatter 被当成不存在 → **所有技能都退化成 name='unnamed'、triggers=[]**，
+  // Skills 这个能力在 Windows 上整体失效（git 默认 autocrlf=true，一 checkout 就是 CRLF；
+  // 用记事本存过的技能文件同理）。CI 第一次跑 windows-latest 就是在这里挂的。
+  const text = raw.replace(/\r\n?/g, '\n');
+  let body = text;
+  const m = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (m) {
     for (const line of m[1].split('\n')) {
       const idx = line.indexOf(':');

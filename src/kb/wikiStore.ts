@@ -190,7 +190,13 @@ export class WikiStore {
       for (const name of names) {
         const file = path.join(dir, name);
         if (fs.statSync(file).isDirectory()) walk(file);
-        else if (name.endsWith('.md')) out.set(path.relative(root, file).slice(0, -3), fs.readFileSync(file, 'utf8'));
+        // ref 是逻辑标识（`concept/分布式锁`），永远用 `/`。path.relative 在 Windows 上给的是
+        // `concept\分布式锁`，直接当 key 的话和 list() 里的 page.ref 对不上：
+        // diff 会把同一个页面报成一条 added + 一条 deleted，rollback 也跟着错。
+        else if (name.endsWith('.md')) {
+          const ref = path.relative(root, file).slice(0, -3).split(path.sep).join('/');
+          out.set(ref, fs.readFileSync(file, 'utf8'));
+        }
       }
     };
     walk(root);

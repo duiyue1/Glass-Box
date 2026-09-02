@@ -198,3 +198,22 @@ test('isSecret 判的是真实路径的形状', () => {
   assert.equal(isSecret('/a/b/README.md'), false);
   assert.equal(isSecret('/a/b/environment.ts'), false, '不能因为含 env 就误判');
 });
+
+test('isSecret 也认 Windows 的反斜杠路径（否则那边整份黑名单形同不存在）', () => {
+  // 名单里的分隔符全是 `/`，而 Windows 的 realpath 给的是 `\`。不归一化的话
+  // `(^|\/)\.ssh\//` 这类规则一条都命中不了，凭证闸门在 Windows 上直接消失。
+  // CI 第一次跑 windows-latest 就是在这里挂的（vision.test.ts 那条读 .ssh\id_rsa 的）。
+  // 这条测试在任何平台都跑，所以不用真有 Windows 也能守住。
+  assert.equal(isSecret('C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\ws\\.ssh\\id_rsa'), true);
+  assert.equal(isSecret('C:\\ws\\.env'), true);
+  assert.equal(isSecret('C:\\ws\\sub\\.env.local'), true);
+  assert.equal(isSecret('C:\\Users\\u\\.aws\\credentials'), true);
+  assert.equal(isSecret('C:\\ws\\deploy.pem'), true);
+  // 大小写：Windows 上 .SSH 和 .ssh 是同一个目录，realpath 可能把原始大小写带回来
+  if (process.platform === 'win32') {
+    assert.equal(isSecret('C:\\ws\\.SSH\\id_rsa'), true);
+  }
+  // 归一化不能把正常文件误判成凭证
+  assert.equal(isSecret('C:\\ws\\src\\README.md'), false);
+  assert.equal(isSecret('C:\\ws\\src\\environment.ts'), false);
+});

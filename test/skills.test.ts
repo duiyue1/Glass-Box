@@ -45,6 +45,29 @@ test('触发词命中中文与英文', () => {
   assert.ok(reg.match('cr 一下这段代码').some((s) => s.name === 'code-review'));
 });
 
+test('技能文件是 CRLF 换行也照样解析（否则 Windows 上整个 Skills 失效）', () => {
+  // `---\r\n` 匹配不上 `^---\n`，frontmatter 会被当成不存在，于是技能全部退化成
+  // name='unnamed' / description='' / triggers=[]——不是少认一个技能，是整个能力没了。
+  // git 在 Windows 上默认 autocrlf=true，一 checkout 就是 CRLF，所以这是那边的常态。
+  // 这条在任何平台都跑：直接写一份 CRLF 文件，不依赖 Windows。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-skills-crlf-'));
+  try {
+    fs.writeFileSync(
+      path.join(dir, 'gamma.md'),
+      ['---', 'name: gamma', 'description: 伽马的用途', 'triggers: 伽马, gamma', '---', '正文一', '正文二'].join('\r\n'),
+    );
+    const reg = loaded(dir);
+    const one = reg.list()[0];
+    assert.equal(one?.name, 'gamma', 'frontmatter 没解析出来时这里会是 unnamed');
+    assert.equal(one?.description, '伽马的用途');
+    assert.deepEqual(one?.triggers, ['伽马', 'gamma'], '触发词不能带上残留的 \\r');
+    assert.ok(reg.match('帮我跑一下 gamma').some((s) => s.name === 'gamma'));
+    assert.equal(reg.get('gamma')?.body, '正文一\n正文二', '正文里也不该残留 \\r');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('短英文触发词按词边界匹配，避免误命中（cr 不命中 script）', () => {
   const reg = loaded(skillsDir);
   assert.equal(reg.match('我喜欢用 TypeScript').length, 0);

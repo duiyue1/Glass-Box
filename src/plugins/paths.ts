@@ -171,7 +171,13 @@ const SECRET_PATTERNS: RegExp[] = [
 
 /** 传**真实路径**（realpath 后），不要传词法路径——软链名字随便起就绕过了 */
 export function isSecret(real: string): boolean {
-  return SECRET_PATTERNS.some((r) => r.test(real));
+  // 匹配前先把分隔符统一成 `/`：名单里的分隔符全是 `/`，而 Windows 的真实路径长这样
+  // `C:\Users\RUNNER~1\AppData\Local\Temp\ws\.ssh\id_rsa`——`(^|\/)` 一条都命中不了，
+  // 于是**整份凭证黑名单在 Windows 上静默失效**（`.pem`/`.key` 那两条只看后缀，
+  // 所以还有一半能拦，更容易让人以为它是好的）。这不是"测试在 Windows 上挂了"，
+  // 是那台机器上根本没有这道闸门。CI 第一次跑 windows 就抓到了。
+  // 顺带在 Windows 上折叠大小写：那边 `.SSH` 和 `.ssh` 是同一个目录。
+  return SECRET_PATTERNS.some((r) => r.test(fold(real.split('\\').join('/'))));
 }
 
 /**

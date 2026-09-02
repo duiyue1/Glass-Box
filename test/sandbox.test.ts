@@ -23,6 +23,10 @@ function repo(): string {
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['config', 'user.name', 'T']);
   git(dir, ['config', 'user.email', 't@example.com']);
+  // 换行不许被 git 翻译。Windows 上 autocrlf 默认是 true，`worktree add` 检出副本时会把
+  // LF 换成 CRLF，于是副本里读出来的是 'one\r\ntwo\r\n'，和这里写进去的 'one\ntwo\n' 不等——
+  // 断言失败信息里两边看起来一模一样（\r 不显示），非常难查。测的是沙箱语义，不是 git 的 EOL 转换。
+  git(dir, ['config', 'core.autocrlf', 'false']);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\ntwo\n');
   fs.writeFileSync(path.join(dir, '.gitignore'), '.glassbox\n');
   git(dir, ['add', '-A']);
