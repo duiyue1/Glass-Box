@@ -147,21 +147,25 @@ test('空补丁不当成成功', () => {
 test('removeSandbox 把目录、worktree 登记和分支一起收拾干净', () => {
   const r = repo();
   const box = createSandbox(r);
-  // `git worktree list` 打印的路径用 `/`（git 内部一律正斜杠），而 box.dir 是
-  // path.join 出来的，Windows 上是 `C:\...`。直接 includes 永远不成立。
-  // Windows 文件系统还大小写不敏感，一并折叠。
+  // 只比末两段（`gb-sandbox-XXXX/<仓库名>`）——mkdtemp 的随机后缀已经足够唯一。
+  // 不比完整路径的原因有两个，都只在 Windows 上出现：
+  //   1. `git worktree list` 一律用正斜杠，而 box.dir 是 path.join 出来的 `C:\...`；
+  //   2. os.tmpdir() 给的是 8.3 短名（`C:\Users\RUNNER~1\...`），git 打印的是展开后的
+  //      长名（`.../runneradmin/...`）——同一个目录，两个字符串永远对不上。
+  // 文件系统还大小写不敏感，一并折叠。
   const norm = (s: string): string => {
     const slashed = s.split('\\').join('/');
     return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
   };
+  const tail = norm(path.join(path.basename(path.dirname(box.dir)), path.basename(box.dir)));
   const worktrees = (): string => norm(git(r, ['worktree', 'list']));
   try {
-    assert.ok(worktrees().includes(norm(box.dir)));
+    assert.ok(worktrees().includes(tail), `worktree 里该有 ${tail}`);
     assert.ok(git(r, ['branch', '--list', box.branch]).trim() !== '');
 
     removeSandbox(box);
     assert.equal(fs.existsSync(box.dir), false);
-    assert.ok(!worktrees().includes(norm(box.dir)));
+    assert.ok(!worktrees().includes(tail), 'worktree 登记要一起清掉');
     assert.equal(git(r, ['branch', '--list', box.branch]).trim(), '', '分支也要删掉，否则越跑越多');
   } finally {
     fs.rmSync(r, { recursive: true, force: true });
