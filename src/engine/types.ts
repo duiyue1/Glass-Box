@@ -486,6 +486,40 @@ export type WireEvent =
       ts: number;
     }
   | { type: 'memory.distilled'; atoms: { kind: string; text: string }[]; total: number; ts: number }
+  /**
+   * 一条旧记忆被新记忆推翻了。
+   *
+   * 必须留痕：agent 记错事情时，第一个要回答的问题是"它为什么以为是这样"。
+   * 旧结论在存储里保留（只是不再注入），加上这条事件，就能还原出
+   * "什么时候、因为哪句话、按哪种判定被推翻的"。
+   */
+  | {
+      type: 'memory.superseded';
+      items: {
+        kind: string;
+        oldText: string;
+        newText: string;
+        /** near-duplicate = 近重复合并；override = 用户明说了改用/不再 */
+        why: string;
+      }[];
+      ts: number;
+    }
+  /**
+   * 记忆规模到上限，淘汰了一些。
+   *
+   * 报出来是为了让"记忆开始丢东西了"这件事可见——静默淘汰会表现成
+   * "agent 莫名忘了以前说过的话"，而那是最难查的一类问题。
+   */
+  | {
+      type: 'memory.pruned';
+      l0Dropped: number;
+      atomsDropped: number;
+      /** 淘汰之后还剩多少（生效 / 含已推翻 / L0） */
+      active: number;
+      total: number;
+      l0: number;
+      ts: number;
+    }
   | {
       type: 'memory.injected';
       items: { kind: string; text: string; score: number }[];

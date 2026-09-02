@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Wire } from '../engine/wire.ts';
 import type { ContextProvider } from '../engine/types.ts';
-import { MemoryStore, makeAtom, type Atom, type HiddenRange, type RetrieveBudget } from './store.ts';
+import { MemoryStore, makeAtom, type Atom, type HiddenRange, type RetrieveBudget, type StoreLimits } from './store.ts';
 
 /**
  * distill：把一句用户输入蒸馏成 L1 原子（规则版，零凭证）。
@@ -30,7 +30,7 @@ function distill(userText: string): Atom[] {
  * 同时对外提供一个 ContextProvider：下一回合按查询预算封顶地检索并注入相关记忆。
  */
 export class Memory {
-  private readonly store = new MemoryStore();
+  private readonly store: MemoryStore;
   private readonly wire: Wire;
   private readonly budget: RetrieveBudget;
   private readonly persistPath?: string;
@@ -38,7 +38,11 @@ export class Memory {
   /** 分叉屏蔽窗口：这些时间段里产生的 fact/event 不再注入（preference/constraint 不受影响） */
   private hidden: HiddenRange[] = [];
 
-  constructor(wire: Wire, budget: RetrieveBudget, persistPath?: string) {
+  constructor(wire: Wire, budget: RetrieveBudget, persistPath?: string, limits: Partial<StoreLimits> = {}) {
+    this.store = new MemoryStore({
+      maxL0: Number(process.env.GB_MEM_MAX_L0 ?? 0) || limits.maxL0,
+      maxAtoms: Number(process.env.GB_MEM_MAX_ATOMS ?? 0) || limits.maxAtoms,
+    });
     this.wire = wire;
     this.budget = budget;
     this.persistPath = persistPath;
@@ -106,9 +110,32 @@ export class Memory {
     this.wire.emit({
       type: 'memory.distilled',
       atoms: atoms.map((a) => ({ kind: a.kind, text: a.text })),
+      // 注意这里是**生效**条数（不含已被推翻的）——用户问"记了多少"时想知道的是这个
       total: this.store.atomCount(),
       ts: Date.now(),
     });
+
+    // 推翻和淘汰都要报出来。静默发生的话，症状是"agent 莫名忘了/记错了"，最难查
+    const superseded = this.store.takeSupersedes();
+    if (superseded.length > 0) {
+      this.wire.emit({
+        type: 'memory.superseded',
+        items: superseded.map((s) => ({ kind: s.kind, oldText: s.oldText, newText: s.newText, why: s.why })),
+        ts: Date.now(),
+      });
+    }
+    const pruned = this.store.takePrune();
+    if (pruned.l0Dropped > 0 || pruned.atomsDropped > 0) {
+      this.wire.emit({
+        type: 'memory.pruned',
+        l0Dropped: pruned.l0Dropped,
+        atomsDropped: pruned.atomsDropped,
+        active: this.store.atomCount(),
+        total: this.store.totalCount(),
+        l0: this.store.l0Count(),
+        ts: Date.now(),
+      });
+    }
   }
 
   /** 作为 ContextProvider 接入 Loop：检索相关记忆并注入本回合 */
