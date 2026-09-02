@@ -92,6 +92,20 @@ export interface LoopOptions {
    * 只对「全是 cacheable 或 parallelSafe、且都不需要审批」的批次生效，见 runTurn 里的判定。
    */
   parallelReads?: boolean;
+  /**
+   * 一个回合累计最多花多少 token（prompt + completion，按网关报回来的真实用量算）。
+   *
+   * 和 `maxSteps` 是两把不同的尺子：步数拦的是「在工具里打转」，花费拦的是「一步很贵」。
+   * 20 步 × 满窗口可以是十几万 token，步数上限对此完全无感。
+   *
+   * 默认 0（不限），因为一个拍出来的默认值会把「无人值守跑长任务」直接判死。
+   * 该设多少得用 `npm run eval:agent -- --sweep GB_TURN_TOKENS=...` 自己量。
+   * 不设也会在回合结束时报 `turn.cost`——**先让花费可见，再谈可控**。
+   *
+   * 撞线后会**超出恰好一个请求的量**：模型还有一次收尾机会，好过留下一个没有任何
+   * 回答的回合。超出量有硬上界，不会失控。
+   */
+  turnTokenBudget?: number;
 }
 
 /** 验证失败时喂回给模型的内容。说清是机械检查的结果，并要求它直接改 */
@@ -115,6 +129,11 @@ const LOW_STEPS_WARN = 2;
 /** 步数用尽且模型仍在要工具时的兜底答复 */
 const STOP_TEXT = (max: number) =>
   `（本回合已达工具步数上限 ${max}，为避免无限循环已停止。可以把任务拆小一点再问我，或用 GB_MAX_STEPS 调大上限。）`;
+
+/** 花费用尽且模型仍在要工具时的兜底答复。要说出花了多少，否则用户只知道"被停了" */
+const BUDGET_STOP_TEXT = (budget: number, spent: number) =>
+  `（本回合已花 ${spent} tok，超过上限 ${budget}，为避免继续烧钱已停止。` +
+  `可以把任务拆小一点再问我，或用 GB_TURN_TOKENS 调大上限。）`;
 
 /**
  * 被用户掐掉时写进历史的那句话。
@@ -147,6 +166,9 @@ export class Loop {
   private readonly maxVerifyRounds: number;
   private readonly compactor?: Compactor;
   private readonly parallelReads: boolean;
+  private readonly turnTokenBudget: number;
+  /** 本回合累计真实用量。回合开始时清零；只统计网关报了 usage 的请求 */
+  private spent = { prompt: 0, completion: 0, cached: 0, requests: 0 };
 
   constructor(wire: Wire, tools: ToolRegistry, llm: Llm, approver: Approver, opts: LoopOptions = {}) {
     this.wire = wire;
@@ -162,6 +184,32 @@ export class Loop {
     this.maxVerifyRounds = Math.max(0, opts.maxVerifyRounds ?? Number(process.env.GB_VERIFY_RETRY ?? 2));
     this.compactor = opts.compactor;
     this.parallelReads = opts.parallelReads ?? process.env.GB_PARALLEL !== '0';
+    this.turnTokenBudget = Math.max(0, opts.turnTokenBudget ?? Number(process.env.GB_TURN_TOKENS ?? 0));
+  }
+
+  /** 本回合累计花了多少（prompt + completion）。缓存命中的那部分仍然计入——它便宜但不免费 */
+  private spentTotal(): number {
+    return this.spent.prompt + this.spent.completion;
+  }
+
+  /**
+   * 回合结束时报一次累计花费。
+   *
+   * 无条件发（只要网关报过 usage），因为「这个回合花了多少」本身就该是可观测的：
+   * 过去只有每次请求的 token.estimate，没人把一个回合加起来看过。
+   */
+  private emitCost(turnId: string): void {
+    if (this.spent.requests === 0) return;
+    this.wire.emit({
+      type: 'turn.cost',
+      turnId,
+      prompt: this.spent.prompt,
+      completion: this.spent.completion,
+      cached: this.spent.cached,
+      requests: this.spent.requests,
+      budget: this.turnTokenBudget,
+      ts: Date.now(),
+    });
   }
 
   private setState(turnId: string, to: TurnState): void {
@@ -178,6 +226,7 @@ export class Loop {
    */
   async runTurn(userText: string, history: Msg[] = [], signal?: AbortSignal): Promise<Msg[]> {
     const turnId = `t_${Date.now()}`;
+    this.spent = { prompt: 0, completion: 0, cached: 0, requests: 0 };
     this.wire.emit({ type: 'turn.start', turnId, userText, ts: Date.now() });
 
     // 1) 按需收集上下文（skills / 记忆）——只影响本回合，不进 convo
@@ -222,6 +271,8 @@ export class Loop {
     let lowWarned = false;
     // 步数用尽后再给模型一次机会收尾（这一次它若还要调工具，就硬停）
     let warned = false;
+    // 花费用尽同理，但单独一个标志：两种停手原因要分开报，否则日志里看不出是"绕圈"还是"太贵"
+    let budgetWarned = false;
     // 上一次失败的调用签名：连续原封不动地重试同一个失败调用是没有意义的
     let lastFailedSig: string | null = null;
     // 本回合成功调用过的工具（verifier 据此判断"动过文件没有"）
@@ -276,6 +327,12 @@ export class Loop {
         throw e;
       }
       this.wire.emit({ type: 'llm.response', turnId, response: resp, ts: Date.now() });
+      if (resp.usage) {
+        this.spent.prompt += resp.usage.prompt;
+        this.spent.completion += resp.usage.completion;
+        this.spent.cached += resp.usage.cached ?? 0;
+        this.spent.requests += 1;
+      }
       // 拿网关报回来的真实用量给自己的估算对账。零依赖用不了真分词器，
       // 这个偏差率就是唯一能知道"估得准不准"的途径，顺便当机械指标使
       if (resp.usage?.prompt) {
@@ -299,6 +356,38 @@ export class Loop {
         const isFree = (name: string) => Boolean(this.tools.get(name)?.free);
         const allFree = calls.every((c) => isFree(c.name));
         const freeExhausted = freeSteps >= this.maxSteps * 2;
+        /**
+         * 花费上限。和步数上限刻意用**不同的放行规则**：
+         * free 工具不占步数，但它**照样花钱**——每转一圈都要问一次模型。
+         * 所以这里不给 free 开后门，否则一个只会反复改计划的模型能一直烧下去。
+         */
+        const overBudget = this.turnTokenBudget > 0 && this.spentTotal() >= this.turnTokenBudget;
+        if (overBudget) {
+          if (budgetWarned) {
+            convo.push({
+              role: 'assistant',
+              content: BUDGET_STOP_TEXT(this.turnTokenBudget, this.spentTotal()),
+            });
+            return this.finish(turnId, convo);
+          }
+          budgetWarned = true;
+          this.wire.emit({
+            type: 'turn.budget',
+            turnId,
+            spent: this.spentTotal(),
+            budget: this.turnTokenBudget,
+            ts: Date.now(),
+          });
+          this.refuseBatch(
+            turnId,
+            convo,
+            calls,
+            (name) =>
+              `未执行 ${name}：本回合累计已花 ${this.spentTotal()} tok，` +
+              `超过上限 ${this.turnTokenBudget}。请基于已有信息直接给出最终答复。`,
+          );
+          continue;
+        }
         // 已经提醒过一次还要继续调工具 -> 不再等它自觉，直接收尾
         if (warned && !(allFree && !freeExhausted)) {
           convo.push({ role: 'assistant', content: STOP_TEXT(this.maxSteps) });
@@ -308,16 +397,13 @@ export class Loop {
           warned = true;
           this.wire.emit({ type: 'turn.limit', turnId, steps, maxSteps: this.maxSteps, ts: Date.now() });
           // 把"步数用尽"当成工具结果喂回去：模型看到的是熟悉的失败反馈，而不是凭空断线
-          for (const call of calls) {
-            const result: ToolResult = {
-              toolCallId: call.id,
-              ok: false,
-              content: `未执行 ${call.name}：本回合工具步数已用尽（上限 ${this.maxSteps}）。请基于已有信息直接给出最终答复。`,
-            };
-            this.wire.emit({ type: 'tool.result', turnId, result, ts: Date.now() });
-            convo.push({ role: 'assistant', content: `[调用工具 ${call.name}]`, toolCalls: [call] });
-            convo.push({ role: 'tool', content: result.content, toolCallId: call.id });
-          }
+          this.refuseBatch(
+            turnId,
+            convo,
+            calls,
+            (name) =>
+              `未执行 ${name}：本回合工具步数已用尽（上限 ${this.maxSteps}）。请基于已有信息直接给出最终答复。`,
+          );
           continue;
         }
 
@@ -489,7 +575,24 @@ export class Loop {
   }
 
   /** 回合收尾：done -> turn.end -> idle */
+  /**
+   * 把「这批调用没执行」的原因当成工具结果喂回模型。
+   *
+   * 为什么不直接结束回合：模型看到的是它熟悉的失败反馈，还能自己收个尾；
+   * 凭空断线的话它下一轮完全不知道发生过什么。
+   * 每个 call 都要配一条 tool 消息，少一条对话就不合法了。
+   */
+  private refuseBatch(turnId: string, convo: Msg[], calls: ToolCall[], why: (name: string) => string): void {
+    for (const call of calls) {
+      const result: ToolResult = { toolCallId: call.id, ok: false, content: why(call.name) };
+      this.wire.emit({ type: 'tool.result', turnId, result, ts: Date.now() });
+      convo.push({ role: 'assistant', content: `[调用工具 ${call.name}]`, toolCalls: [call] });
+      convo.push({ role: 'tool', content: result.content, toolCallId: call.id });
+    }
+  }
+
   private finish(turnId: string, convo: Msg[]): Msg[] {
+    this.emitCost(turnId);
     this.setState(turnId, 'done');
     this.wire.emit({ type: 'turn.end', turnId, messages: redactMsgs(convo, this.blobs), ts: Date.now() });
     this.setState(turnId, 'idle');

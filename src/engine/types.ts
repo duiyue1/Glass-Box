@@ -328,6 +328,21 @@ export type WireEvent =
       decision?: ApprovalDecision;
       ts: number;
     }
+  /**
+   * 一次操作因为 `.glassbox/policy.json` 里的预先允许而没有问人。
+   *
+   * 为什么必须单独发一条：一次没人看见的放行，和没有闸门是一样的。
+   * 事件里写明命中了哪条规则（工具 + 参数前缀 + 允许到哪一级 + 为什么加的），
+   * 这样"为什么这个命令没问我"事后永远查得到。
+   */
+  | {
+      type: 'approval.policy';
+      turnId: string;
+      request: ApprovalRequest;
+      /** 命中的规则，原样带出来 */
+      rule: { tool: string; argPrefix?: string; maxLevel?: string; until?: string; reason?: string };
+      ts: number;
+    }
   | { type: 'plugin.loaded'; name: string; tools: string[]; ts: number }
   | { type: 'skill.available'; skills: string[]; ts: number }
   /**
@@ -415,6 +430,33 @@ export type WireEvent =
     }
   | {
       type: 'turn.limit'; turnId: string; steps: number; maxSteps: number; ts: number }
+  /**
+   * 本回合累计花了多少真实 token。回合结束时发一次（网关报过 usage 才有）。
+   *
+   * 为什么要单独一个事件：`token.estimate` 是**每次请求**的对账，从来没人把一个回合
+   * 加起来看过。而"这个回合花了多少"恰恰是唯一能跟用户直接对话的成本口径。
+   * 有没有设上限都发——先让花费可见，再谈可控。
+   */
+  | {
+      type: 'turn.cost';
+      turnId: string;
+      prompt: number;
+      completion: number;
+      /** 命中前缀缓存的输入 token（已包含在 prompt 里，便宜但不免费） */
+      cached: number;
+      /** 这个回合问了模型几次 */
+      requests: number;
+      /** 当时生效的上限，0 表示不限 */
+      budget: number;
+      ts: number;
+    }
+  /**
+   * 累计花费撞上上限，本回合被停。
+   *
+   * 和 `turn.limit` 分开发：一个是"在工具里绕圈"，一个是"步子不多但每步很贵"。
+   * 事后归因时这两种失败模式完全不同，不能混成一个信号。
+   */
+  | { type: 'turn.budget'; turnId: string; spent: number; budget: number; ts: number }
   /**
    * 用户把这个回合掐了。
    *

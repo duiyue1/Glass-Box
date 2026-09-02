@@ -1,7 +1,84 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractActionCommand, retryDelayMs, retryableStatus, RealLlm } from '../src/llm/realLlm.ts';
+import { extractActionCommand, retryDelayMs, retryableStatus, RealLlm, resolveCheapModelConfig } from '../src/llm/realLlm.ts';
 import { parseCommand } from '../src/llm/commandGrammar.ts';
+
+/* ── 便宜模型分层：只给没有共享前缀的辅助调用用 ── */
+
+/** 临时改一批环境变量，跑完还原（测试之间不能互相污染） */
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const saved = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const MAIN = {
+  GLASSBOX_MODEL_BASE_URL: 'https://main.example.test/v1',
+  GLASSBOX_MODEL_NAME: 'big',
+  GLASSBOX_MODEL_API_KEY: 'k-main',
+  MIDSCENE_MODEL_BASE_URL: undefined,
+  MIDSCENE_MODEL_NAME: undefined,
+  MIDSCENE_MODEL_API_KEY: undefined,
+};
+
+test('没配便宜模型就返回 undefined（不启用分层）', () => {
+  withEnv({ ...MAIN, GLASSBOX_MODEL_CHEAP_NAME: undefined }, () => {
+    assert.equal(resolveCheapModelConfig(), undefined);
+  });
+});
+
+test('只给便宜模型名就够：base url 和 key 沿用主模型', () => {
+  // 最常见的情形是同一个网关换个便宜模型名，不该要求把三项重写一遍
+  withEnv({ ...MAIN, GLASSBOX_MODEL_CHEAP_NAME: 'small' }, () => {
+    const cfg = resolveCheapModelConfig();
+    assert.equal(cfg?.model, 'small');
+    assert.equal(cfg?.baseUrl, 'https://main.example.test/v1');
+    assert.equal(cfg?.apiKey, 'k-main');
+  });
+});
+
+test('便宜模型可以指向另一个网关', () => {
+  withEnv(
+    {
+      ...MAIN,
+      GLASSBOX_MODEL_CHEAP_NAME: 'small',
+      GLASSBOX_MODEL_CHEAP_BASE_URL: 'https://cheap.example.test/v1',
+      GLASSBOX_MODEL_CHEAP_API_KEY: 'k-cheap',
+    },
+    () => {
+      const cfg = resolveCheapModelConfig();
+      assert.equal(cfg?.baseUrl, 'https://cheap.example.test/v1');
+      assert.equal(cfg?.apiKey, 'k-cheap');
+    },
+  );
+});
+
+test('主模型凭证都没有时不启用分层（沿用不到 base url/key）', () => {
+  withEnv(
+    {
+      GLASSBOX_MODEL_BASE_URL: undefined,
+      GLASSBOX_MODEL_NAME: undefined,
+      GLASSBOX_MODEL_API_KEY: undefined,
+      MIDSCENE_MODEL_BASE_URL: undefined,
+      MIDSCENE_MODEL_NAME: undefined,
+      MIDSCENE_MODEL_API_KEY: undefined,
+      GLASSBOX_MODEL_CHEAP_NAME: 'small',
+    },
+    () => {
+      assert.equal(resolveCheapModelConfig(), undefined, '不能凭空造出一个没有凭证的模型');
+    },
+  );
+});
 
 test('抽取普通 ACTION 行', () => {
   assert.equal(extractActionCommand('ACTION: grep TurnState'), 'grep TurnState');
@@ -57,7 +134,6 @@ test('去掉指令尾部残留的反引号与空白', () => {
 });
 
 /* ── 限流与退避重试 ── */
-
 const cfg = { baseUrl: 'http://x/v1', model: 'm', apiKey: 'k', contextWindow: 8000 };
 
 /** 组一个只带 get 的最小 Headers 替身 */

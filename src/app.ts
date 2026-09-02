@@ -8,8 +8,9 @@ import { llmSummarizer } from './engine/summarize.ts';
 import { loadPlugins } from './engine/plugin.ts';
 import type { Approver } from './engine/types.ts';
 import { AutoApprover, RememberingApprover, rememberedFrom } from './engine/approval.ts';
+import { PolicyApprover, readPolicy } from './engine/policy.ts';
 import { FakeLlm } from './llm/fakeLlm.ts';
-import { RealLlm, resolveModelConfig, DEFAULT_CONTEXT_WINDOW } from './llm/realLlm.ts';
+import { RealLlm, resolveModelConfig, resolveCheapModelConfig, DEFAULT_CONTEXT_WINDOW } from './llm/realLlm.ts';
 import type { Llm } from './engine/loop.ts';
 import { echoTool } from './tools/echo.ts';
 import { fsPlugin } from './plugins/fsPlugin.ts';
@@ -201,6 +202,23 @@ export function pickLlm(): { llm: Llm; label: string } {
   return { llm: new FakeLlm(), label: 'FakeLlm' };
 }
 
+/**
+ * 便宜模型：只给「没有共享前缀可吃」的辅助调用用（目前是资料库检索改写）。
+ *
+ * 没配 `GLASSBOX_MODEL_CHEAP_NAME` 就原样返回主模型 —— 调用点因此不需要写任何
+ * 分支判断，也就不会出现"忘了处理没配的情况"。
+ * 主模型是 FakeLlm 时也不切：那是零凭证演示，切过去等于凭空要求凭证。
+ *
+ * 刻意**不**用在对话压缩上，原因见 `resolveCheapModelConfig` 的注释
+ * （压缩是故意复用主模型来命中前缀缓存的，换模型反而更贵）。
+ */
+export function pickCheapLlm(main: Llm): { llm: Llm; label?: string } {
+  if (main instanceof FakeLlm) return { llm: main };
+  const cfg = resolveCheapModelConfig();
+  if (!cfg) return { llm: main };
+  return { llm: new RealLlm(cfg), label: `RealLlm(${cfg.model})` };
+}
+
 /** 窗口用到这个比例就压缩（对齐 dsh 的 thresholdRatio 默认值） */
 const DEFAULT_COMPACT_RATIO = 0.8;
 /** 保留最近这么大一段原样不动（对齐 dsh 的 retainRatio 默认值） */
@@ -384,10 +402,13 @@ export function buildApp(opts: {
 
   // 模型和预算要先定下来：注入配额是从总预算里分的，而总预算跟着模型窗口走
   const { llm, label } = pickLlm();
+  const { llm: cheapLlm, label: cheapLabel } = pickCheapLlm(llm);
   const { budget, retainRatio, source: budgetSource } = resolveBudget(llm, opts.budget);
   const inject = resolveInjectBudget(budget, retainRatio !== undefined);
   if (process.env.GB_LLM_QUIET !== '1') {
     console.error(`[Glass-Box] 使用模型: ${label}`);
+    // 只有真的分层了才提，否则一行"便宜模型 = 主模型"是噪音
+    if (cheapLabel) console.error(`[Glass-Box] 辅助调用用便宜模型: ${cheapLabel}（检索改写）`);
     console.error(`[Glass-Box] 上下文预算: ${budgetSource}`);
     console.error(`[Glass-Box] 注入配额: ${inject.source}`);
   }
@@ -498,6 +519,29 @@ export function buildApp(opts: {
     console.error(`[Glass-Box] 恢复审批记忆 ${rememberedKeys.length} 条：${rememberedKeys.join(', ')}`);
   }
   const approver = new RememberingApprover(baseApprover, rememberedKeys);
+  /**
+   * 预先允许（`.glassbox/policy.json`）包在最外面：
+   * 策略是"事先声明的"，会话记忆是"临时答出来的"，前者先判。
+   *
+   * 读取错误一定要打印出来。一条写错的安全规则静默失效，比根本没有配置更危险——
+   * 用户以为自己声明了边界，实际什么都没生效（或者反过来，以为没生效其实生效了）。
+   */
+  const policy = readPolicy(workspace);
+  for (const err of policy.errors) console.error(`[Glass-Box] policy.json: ${err}`);
+  if (policy.rules.length && process.env.GB_LLM_QUIET !== '1') {
+    console.error(`[Glass-Box] 预先允许 ${policy.rules.length} 条（.glassbox/policy.json）`);
+  }
+  // 审批发生在某个回合内，但 Approver 的接口只有 request，拿不到 turnId。
+  // 跟着事件流记一下最近的回合号：够用，且不用为一条审计事件去改 Approver 接口。
+  let lastTurnId = '';
+  wire.subscribe((e) => {
+    if (e.type === 'turn.start') lastTurnId = e.turnId;
+  });
+  const gatedApprover = policy.rules.length
+    ? new PolicyApprover(approver, policy.rules, (rule, request) => {
+        wire.emit({ type: 'approval.policy', turnId: lastTurnId, request, rule, ts: Date.now() });
+      })
+    : approver;
   // 压缩器由 Loop 和 Session 共用：同一套保留规则，两个入口
   // （Loop 在发请求前压，那里才看得见注入与系统开销；Session 在回合之间压）
   const compactor = new Compactor(wire, {
@@ -512,7 +556,7 @@ export function buildApp(opts: {
     // 而且八段摘要本身很长，压缩比反而从 -55% 掉到 -13%。GB_SUMMARY=1 打开
     summarizer: process.env.GB_SUMMARY === '1' ? llmSummarizer(llm) : undefined,
   });
-  const loop = new Loop(wire, tools, llm, approver, {
+  const loop = new Loop(wire, tools, llm, gatedApprover, {
     providers: [
       ...(skillMode === 'off'
         ? []
@@ -521,8 +565,10 @@ export function buildApp(opts: {
       ...(kbOn
         ? [
             kbProvider(kb, wire, kbBudget, {
-              // 检索改写要调模型，所以把 llm 递进去。GB_KB_REWRITE=0 关掉（对照组）
-              llm,
+              // 检索改写要调模型。这里用便宜模型（配了才有，否则就是主模型）：
+              // 改写自带系统提示、输入只有几百 token，和主对话没有共同前缀，
+              // 没有前缀缓存可损失，换便宜模型基本等于白省。
+              llm: cheapLlm,
               maxRewrites: Number(process.env.GB_KB_REWRITE ?? 1),
               minTop1: Number(process.env.GB_KB_MIN_TOP1 ?? 0),
             }),
@@ -576,7 +622,7 @@ export function buildApp(opts: {
               ),
             ]
           : []),
-        subagentPlugin(workspace, llm, approver),
+        subagentPlugin(workspace, llm, gatedApprover),
       ],
       { tools, wire, workspace },
     );

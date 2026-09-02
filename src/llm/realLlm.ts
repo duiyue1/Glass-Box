@@ -54,6 +54,39 @@ export function resolveModelConfig(): ModelConfig {
   };
 }
 
+/**
+ * 便宜模型（可选）。只在**没有共享前缀可吃**的辅助调用上用它。
+ *
+ * 什么时候值得切：资料库检索改写、wiki 条目摘要这类调用，各自带自己的系统提示、
+ * 输入就那么几百到几千 token，和主对话没有任何共同前缀。这种活换个便宜模型
+ * 基本等于白省。
+ *
+ * **什么时候千万别切：对话压缩。** `engine/summarize.ts` 是故意复用主模型的——
+ * 它把待压缩的消息原样回放、只在末尾追加一条指令，于是这次调用是上一次请求的真前缀，
+ * 网关的前缀缓存能命中（实测报过 `缓存命中 3584`，输入几乎白拿）。
+ * 切到另一个模型意味着缓存全冷，要按全价付一整段对话的输入——
+ * 而压缩的输入恰恰是整个系统里最长的那一段。便宜模型的单价优势填不平这个坑。
+ *
+ * 只给 `GLASSBOX_MODEL_CHEAP_NAME` 就够：base url 和 key 默认沿用主模型
+ * （同一个网关换个模型名是最常见的情形）。返回 undefined 表示不启用分层。
+ */
+export function resolveCheapModelConfig(): ModelConfig | undefined {
+  const env = process.env;
+  const model = env.GLASSBOX_MODEL_CHEAP_NAME;
+  if (!model) return undefined;
+  const main = resolveModelConfig();
+  const baseUrl = env.GLASSBOX_MODEL_CHEAP_BASE_URL ?? main.baseUrl;
+  const apiKey = env.GLASSBOX_MODEL_CHEAP_API_KEY ?? main.apiKey;
+  if (!baseUrl || !apiKey) return undefined;
+  const window = Number(env.GLASSBOX_MODEL_CHEAP_WINDOW ?? main.contextWindow);
+  return {
+    baseUrl,
+    model,
+    apiKey,
+    contextWindow: Number.isInteger(window) && window > 0 ? window : main.contextWindow,
+  };
+}
+
 /** 工具结果回喂给模型时的前缀。也是最容易被模型"顺手续写"的标记，所以同时作为停止词。 */
 export const TOOL_RESULT_MARK = '【工具结果】';
 
